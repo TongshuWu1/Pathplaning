@@ -1,9 +1,10 @@
 from __future__ import annotations
 
-from dataclasses import replace
 from typing import Dict, List, Optional, Tuple
 import math
 from collections import deque
+from datetime import datetime
+from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -50,6 +51,10 @@ class Simulator:
             robot_radius=self.cfg.robot_radius,
             inflation_margin=self.cfg.planner_inflation_margin,
             world_obstacles=self.world.obstacles,
+            clearance_weight=self.cfg.planner_clearance_weight,
+            clearance_floor_m=self.cfg.planner_clearance_floor_m,
+            narrow_penalty=self.cfg.planner_narrow_penalty,
+            unknown_edge_penalty=self.cfg.planner_unknown_edge_penalty,
         )
         self.policy = LocalFrontierPolicy(
             grid=self.grid,
@@ -61,6 +66,7 @@ class Simulator:
             decay_s=self.cfg.teammate_trace_decay_s,
         )
         self.robots = []
+        run_dir = self._make_run_dir()
         for i, (x, y) in enumerate(self.spawn_positions(self.cfg.robot_count)):
             local = OccupancyGrid(self.cfg.world_w, self.cfg.world_h, self.cfg.grid_res)
             robot = Robot(
@@ -73,9 +79,9 @@ class Simulator:
                 cfg=self.cfg,
                 local_map=local,
                 rng_seed=self.cfg.seed * 1000 + i * 31 + 7,
+                log_dir=run_dir,
             )
             local.reveal_disk(robot.x, robot.y, radius=1.4)
-            robot.path_history.append((x, y))
             self.robots.append(robot)
         self.time_s = 0.0
         self.step_count = 0
@@ -83,6 +89,18 @@ class Simulator:
         self.robot_comm_edges = []
         self.home_comm_links = []
         self._update_communication_state()
+        for robot in self.robots:
+            robot.logger.write_snapshot(robot.knowledge_snapshot(self.time_s))
+
+    def _make_run_dir(self) -> str | None:
+        if not self.cfg.logs_enabled:
+            return None
+        ts = datetime.now().strftime('%Y%m%d_%H%M%S_%f')
+        path = Path(self.cfg.logs_root) / f'run_{ts}'
+        path.mkdir(parents=True, exist_ok=True)
+        summary = path / 'summary.txt'
+        summary.write_text(f'robot_count={self.cfg.robot_count}\nseed={self.cfg.seed}\n')
+        return str(path)
 
     def spawn_positions(self, count: int) -> List[Tuple[float, float]]:
         base = self.world.home_base
@@ -121,13 +139,14 @@ class Simulator:
 
         self._update_communication_state()
         for robot in self.robots:
+            robot.note_connectivity_state(self.time_s)
             robot.ingest_shared_teammate_info(self.time_s)
         robots_by_id = {r.robot_id: r for r in self.robots}
         all_landmarks = self.world.all_landmarks
         for robot in self.robots:
-            rays = robot.sense(self.world.obstacles)
+            beams = robot.sense(self.world.obstacles)
             robot.update_localization(all_landmarks, robots_by_id, self.world.obstacles, self.time_s)
-            robot.update_map(rays)
+            robot.update_map(beams)
 
         for robot in self.robots:
             need_replan = (
@@ -152,6 +171,7 @@ class Simulator:
                         robot.last_plan_time = self.time_s
                         robot.last_target_time = self.time_s
                         robot.request_replan = False
+                        robot.logger.log(self.time_s, 'replan', target_xy=choice.target_xy, score=choice.score, info_gain=choice.info_gain, travel_cost=choice.travel_cost, overlap_penalty=choice.overlap_penalty)
                         robot.last_choice_debug = (
                             f'gain={choice.info_gain:4.0f} cost={choice.travel_cost:4.1f}\n'
                             f'overlap={choice.overlap_penalty:4.1f} score={choice.score:5.1f}'
@@ -160,9 +180,11 @@ class Simulator:
                 elif robot.request_replan:
                     robot.last_choice_debug = 'replan requested\nno frontier selected'
                     robot.request_replan = False
-            robot.follow_path(self.cfg.dt, self.world.obstacles)
+            robot.follow_path(self.cfg.dt, self.world.obstacles, now=self.time_s)
 
         self._update_communication_state()
+        for robot in self.robots:
+            robot.logger.write_snapshot(robot.knowledge_snapshot(self.time_s))
 
     def estimated_coverage(self) -> float:
         masks = [(r.local_map.data != UNKNOWN) for r in self.robots]

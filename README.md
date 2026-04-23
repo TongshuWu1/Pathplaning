@@ -10,6 +10,7 @@ A cleaner baseline for decentralized multi-robot exploration.
 - per-robot local occupancy maps built only from that robot's LiDAR
 - no shared mapping
 - lightweight teammate packets relayed through the current communication graph
+- teammate packets now share estimated pose + covariance, full remembered estimated path from home, and navigation keypoints (no true-path leakage)
 - landmark-based EKF-style localization updates from fixed landmarks and the home marker
 - teammate-assisted cooperative localization using received teammate mean/covariance as uncertain mobile references
 - decentralized frontier exploration with teammate-trace avoidance
@@ -23,6 +24,10 @@ A cleaner baseline for decentralized multi-robot exploration.
   - home-base links require LOS to the home region and communication range
   - multi-hop connectivity is tracked every step
   - robots only receive teammate packets from their reachable communication component
+- modeling consistency fixes:
+  - LiDAR mapping now consumes sensor-frame range/bearing beams and projects them from the robot's estimated pose
+  - teammate path sharing now uses estimated history rather than ground-truth trajectory
+  - each robot keeps a remembered teammate path/keypoint overlay on its own local map, even after LOS is lost
 - additional speed work:
   - faster grid indexing in mapping
   - cached planner inflation offsets

@@ -12,12 +12,25 @@ from .geometry import RectObstacle, circle_intersects_rect
 
 
 @dataclass
+class PlanStats:
+    path_length_m: float = 0.0
+    min_clearance_m: float = 0.0
+    avg_clearance_m: float = 0.0
+    narrow_fraction: float = 0.0
+
+
+@dataclass
 class GridPlanner:
     grid: OccupancyGrid
     robot_radius: float
     inflation_margin: float
     world_obstacles: List[RectObstacle]
+    clearance_weight: float = 2.4
+    clearance_floor_m: float = 0.70
+    narrow_penalty: float = 1.25
+    unknown_edge_penalty: float = 0.30
     _inflate_offsets: List[Tuple[int, int]] = field(init=False, repr=False)
+    last_plan_stats: PlanStats = field(default_factory=PlanStats, init=False)
 
     def __post_init__(self) -> None:
         inflate = self.robot_radius + self.inflation_margin
@@ -50,6 +63,7 @@ class GridPlanner:
         return any(circle_intersects_rect(x, y, self.robot_radius, obs) for obs in self.world_obstacles)
 
     def plan(self, start_xy: Tuple[float, float], goal_xy: Tuple[float, float], local_map: np.ndarray) -> Optional[List[Tuple[float, float]]]:
+        self.last_plan_stats = PlanStats()
         sx, sy = self.grid.world_to_grid(*start_xy)
         gx, gy = self.grid.world_to_grid(*goal_xy)
         blocked = self.inflated_mask(local_map)
@@ -60,6 +74,7 @@ class GridPlanner:
             if found is None:
                 return None
             gx, gy = found
+        clearance = self._clearance_map(blocked)
         start = (sx, sy)
         goal = (gx, gy)
         pq: List[Tuple[float, Tuple[int, int]]] = []
@@ -81,7 +96,8 @@ class GridPlanner:
                 if dx != 0 and dy != 0 and (blocked[cy, nx] or blocked[ny, cx]):
                     continue
                 step = math.sqrt(2.0) if dx and dy else 1.0
-                cand = g_cost[node] + step
+                traversability = self._cell_traversal_cost(nx, ny, clearance, local_map)
+                cand = g_cost[node] + step * traversability
                 nxt = (nx, ny)
                 if cand < g_cost.get(nxt, float('inf')):
                     g_cost[nxt] = cand
@@ -95,7 +111,9 @@ class GridPlanner:
             cells.append(parent[cells[-1]])
         cells.reverse()
         path = [self.grid.grid_to_world(x, y) for x, y in cells]
-        return self._compress(path, local_map)
+        path = self._compress(path, local_map, blocked)
+        self.last_plan_stats = self._path_stats(path, clearance)
+        return path
 
     def _nearest_free(self, start: Tuple[int, int], blocked: np.ndarray) -> Optional[Tuple[int, int]]:
         sx, sy = start
@@ -106,20 +124,22 @@ class GridPlanner:
                         return (xx, yy)
         return None
 
-    def _compress(self, path: List[Tuple[float, float]], local_map: np.ndarray) -> List[Tuple[float, float]]:
+    def _compress(self, path: List[Tuple[float, float]], local_map: np.ndarray, blocked: Optional[np.ndarray] = None) -> List[Tuple[float, float]]:
         if len(path) <= 2:
             return path
         out = [path[0]]
         anchor = path[0]
         for i in range(2, len(path)):
-            if not self._segment_free(anchor, path[i], local_map):
+            if not self._segment_free(anchor, path[i], local_map, blocked):
                 anchor = path[i - 1]
                 out.append(anchor)
         out.append(path[-1])
         return out
 
-    def _segment_free(self, p0: Tuple[float, float], p1: Tuple[float, float], local_map: np.ndarray) -> bool:
-        blocked = self.inflated_mask(local_map)
+    def _segment_free(self, p0: Tuple[float, float], p1: Tuple[float, float], local_map: np.ndarray,
+                      blocked: Optional[np.ndarray] = None) -> bool:
+        if blocked is None:
+            blocked = self.inflated_mask(local_map)
         x0, y0 = p0
         x1, y1 = p1
         d = math.hypot(x1 - x0, y1 - y0)
@@ -132,3 +152,64 @@ class GridPlanner:
             if blocked[gy, gx] or self.exact_world_collision(x, y):
                 return False
         return True
+
+    def _clearance_map(self, blocked: np.ndarray) -> np.ndarray:
+        clearance = np.full((self.grid.ny, self.grid.nx), np.inf, dtype=float)
+        pq: List[Tuple[float, Tuple[int, int]]] = []
+        for y, x in zip(*np.where(blocked)):
+            clearance[y, x] = 0.0
+            heapq.heappush(pq, (0.0, (x, y)))
+        nbrs = [(-1, 0), (1, 0), (0, -1), (0, 1), (-1, -1), (-1, 1), (1, -1), (1, 1)]
+        while pq:
+            cur_d, (cx, cy) = heapq.heappop(pq)
+            if cur_d > clearance[cy, cx]:
+                continue
+            for dx, dy in nbrs:
+                nx, ny = cx + dx, cy + dy
+                if not (0 <= nx < self.grid.nx and 0 <= ny < self.grid.ny):
+                    continue
+                step = math.sqrt(2.0) if dx and dy else 1.0
+                nd = cur_d + step
+                if nd < clearance[ny, nx]:
+                    clearance[ny, nx] = nd
+                    heapq.heappush(pq, (nd, (nx, ny)))
+        return clearance * self.grid.res
+
+    def _cell_traversal_cost(self, gx: int, gy: int, clearance: np.ndarray, local_map: np.ndarray) -> float:
+        c = float(clearance[gy, gx])
+        eps = max(0.05, 0.25 * self.grid.res)
+        wall_penalty = self.clearance_weight / max(c + eps, eps)
+        if c >= self.clearance_floor_m:
+            wall_penalty *= 0.25
+        narrow_pen = self.narrow_penalty if c < self.clearance_floor_m else 0.0
+        unknown_adj_pen = self.unknown_edge_penalty if self._adjacent_to_unknown(gx, gy, local_map) else 0.0
+        return 1.0 + wall_penalty + narrow_pen + unknown_adj_pen
+
+    def _adjacent_to_unknown(self, gx: int, gy: int, local_map: np.ndarray) -> bool:
+        for yy in range(max(0, gy - 1), min(self.grid.ny, gy + 2)):
+            for xx in range(max(0, gx - 1), min(self.grid.nx, gx + 2)):
+                if local_map[yy, xx] < 0:
+                    return True
+        return False
+
+    def _path_stats(self, path: List[Tuple[float, float]], clearance: np.ndarray) -> PlanStats:
+        if not path:
+            return PlanStats()
+        clear_vals: List[float] = []
+        path_len = 0.0
+        for i, (x, y) in enumerate(path):
+            gx, gy = self.grid.world_to_grid(x, y)
+            clear_vals.append(float(clearance[gy, gx]))
+            if i > 0:
+                x0, y0 = path[i - 1]
+                path_len += math.hypot(x - x0, y - y0)
+        if not clear_vals:
+            return PlanStats(path_length_m=path_len)
+        thresh = self.clearance_floor_m
+        narrow = sum(1 for v in clear_vals if v < thresh) / max(1, len(clear_vals))
+        return PlanStats(
+            path_length_m=path_len,
+            min_clearance_m=min(clear_vals),
+            avg_clearance_m=sum(clear_vals) / len(clear_vals),
+            narrow_fraction=narrow,
+        )

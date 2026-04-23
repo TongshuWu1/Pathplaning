@@ -1,12 +1,20 @@
 from __future__ import annotations
 
+import math
 import numpy as np
 from dataclasses import dataclass
-from typing import Iterable, List, Sequence, Tuple
+from typing import List, Sequence, Tuple
 
 UNKNOWN = -1
 FREE = 0
 OCCUPIED = 1
+
+
+@dataclass(frozen=True)
+class ScanBeam:
+    range_m: float
+    bearing_rad: float
+    hit: bool
 
 
 @dataclass
@@ -58,9 +66,21 @@ class OccupancyGrid:
                     self.data[yy, xx] = FREE
 
 
-def apply_scan(grid: OccupancyGrid, origin_xy: Tuple[float, float], rays: Sequence[Tuple[float, float, bool]], step: float) -> None:
+def apply_scan(
+    grid: OccupancyGrid,
+    origin_xy: Tuple[float, float],
+    heading_deg: float,
+    beams: Sequence[ScanBeam],
+    step: float,
+) -> None:
     ox, oy = origin_xy
-    for hx, hy, hit in rays:
+    heading_rad = math.radians(heading_deg)
+    for beam in beams:
+        if beam.range_m < 1e-9:
+            continue
+        ray_ang = heading_rad + beam.bearing_rad
+        hx = ox + beam.range_m * math.cos(ray_ang)
+        hy = oy + beam.range_m * math.sin(ray_ang)
         dx = hx - ox
         dy = hy - oy
         dist = float(np.hypot(dx, dy))
@@ -72,7 +92,7 @@ def apply_scan(grid: OccupancyGrid, origin_xy: Tuple[float, float], rays: Sequen
             x = ox + t * dx
             y = oy + t * dy
             grid.mark_free(x, y)
-        if hit:
+        if beam.hit:
             grid.mark_occupied(hx, hy)
         else:
             grid.mark_free(hx, hy)

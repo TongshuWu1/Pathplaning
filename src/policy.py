@@ -7,16 +7,7 @@ import math
 import numpy as np
 
 from .mapping import FREE, UNKNOWN, OccupancyGrid, connected_components, frontier_mask
-
-
-@dataclass
-class TeammatePacket:
-    robot_id: int
-    pose_xy: Tuple[float, float]
-    pose_cov: np.ndarray
-    target_xy: Optional[Tuple[float, float]]
-    path_xy: List[Tuple[float, float]]
-    timestamp: float
+from .robots.packets import TeammatePacket
 
 
 @dataclass

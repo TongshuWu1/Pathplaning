@@ -56,6 +56,7 @@ class SimulatorUI:
         self.local_packet_scatter = []
         self.local_target_scatter = []
         self.local_shared_keypoint_scatter = []
+        self.local_landmark_scatter = []
         self.local_robot_scatter = []
         self.local_est_scatter = []
         self.local_robot_target_scatter = []
@@ -65,6 +66,7 @@ class SimulatorUI:
         self.local_path_lines = []
         self.local_drift_lines = []
         self.local_cov_ellipses = []
+        self.local_teammate_cov_ellipses = []
         self.local_texts = []
 
     def build(self) -> UIState:
@@ -110,6 +112,7 @@ class SimulatorUI:
         self.local_packet_scatter = []
         self.local_target_scatter = []
         self.local_shared_keypoint_scatter = []
+        self.local_landmark_scatter = []
         self.local_robot_scatter = []
         self.local_est_scatter = []
         self.local_robot_target_scatter = []
@@ -119,6 +122,7 @@ class SimulatorUI:
         self.local_path_lines = []
         self.local_drift_lines = []
         self.local_cov_ellipses = []
+        self.local_teammate_cov_ellipses = []
         self.local_texts = []
 
     def _build_toolbar(self) -> None:
@@ -305,9 +309,8 @@ class SimulatorUI:
                 zorder=1,
             )
             self._draw_home_base(ax)
-            ax.scatter(
-                [lm.x for lm in self.sim.world.landmarks], [lm.y for lm in self.sim.world.landmarks],
-                marker='*', s=20, c='#f2c641', edgecolors='black', linewidths=0.35, alpha=0.30, zorder=2,
+            landmark_scatter = ax.scatter(
+                [], [], marker='*', s=20, c='#f2c641', edgecolors='black', linewidths=0.35, alpha=0.70, zorder=2,
             )
             ax.scatter(
                 [self.sim.world.home_marker.x], [self.sim.world.home_marker.y],
@@ -331,9 +334,15 @@ class SimulatorUI:
             keypoint_scatter = ax.scatter([], [], s=11, marker='o', c='#ef4444', alpha=0.50, linewidths=0, zorder=5)
 
             teammate_lines = []
+            teammate_covs = []
             for other in self.sim.robots:
                 line, = ax.plot([], [], linestyle='--', linewidth=0.95, alpha=0.65, color=other.color, zorder=5)
                 teammate_lines.append(line)
+                ell = patches.Ellipse((0.0, 0.0), width=0.01, height=0.01, angle=0.0,
+                                      facecolor='none', edgecolor=other.color, linewidth=0.85,
+                                      linestyle='--', alpha=0.55, zorder=6, visible=False)
+                ax.add_patch(ell)
+                teammate_covs.append(ell)
 
             txt = info_ax.text(
                 0.02, 0.96, '', transform=info_ax.transAxes,
@@ -347,10 +356,12 @@ class SimulatorUI:
             self.local_packet_scatter.append(packet_scatter)
             self.local_target_scatter.append(target_scatter)
             self.local_shared_keypoint_scatter.append(keypoint_scatter)
+            self.local_landmark_scatter.append(landmark_scatter)
             self.local_robot_scatter.append(own_robot_scatter)
             self.local_est_scatter.append(own_est_scatter)
             self.local_drift_lines.append(own_drift_line)
             self.local_cov_ellipses.append(own_cov)
+            self.local_teammate_cov_ellipses.append(teammate_covs)
             self.local_robot_target_scatter.append(own_target_scatter)
             self.local_robot_path_lines.append(own_path_line)
             self.local_est_path_lines.append(own_est_path_line)
@@ -380,10 +391,13 @@ class SimulatorUI:
         artists.extend(self.local_packet_scatter)
         artists.extend(self.local_target_scatter)
         artists.extend(self.local_shared_keypoint_scatter)
+        artists.extend(self.local_landmark_scatter)
         artists.extend(self.local_robot_scatter)
         artists.extend(self.local_est_scatter)
         artists.extend(self.local_drift_lines)
         artists.extend(self.local_cov_ellipses)
+        for ellipses in self.local_teammate_cov_ellipses:
+            artists.extend(ellipses)
         artists.extend(self.local_robot_target_scatter)
         artists.extend(self.local_robot_path_lines)
         artists.extend(self.local_est_path_lines)
@@ -456,6 +470,13 @@ class SimulatorUI:
         for idx, robot in enumerate(self.sim.robots):
             self.local_images[idx].set_data(robot.local_map.data)
 
+            known_landmarks = [info for key, info in robot.known_landmark_beliefs().items() if not bool(info.get('is_home', False))]
+            if known_landmarks:
+                lm_xy = np.asarray([info['xy'] for info in known_landmarks], dtype=float).reshape((-1, 2))
+                self.local_landmark_scatter[idx].set_offsets(lm_xy)
+            else:
+                self.local_landmark_scatter[idx].set_offsets(np.empty((0, 2), dtype=float))
+
             frontier = frontier_mask(robot.local_map.data)
             rr, cc = np.where(frontier)
             if len(rr) > 350:
@@ -469,24 +490,25 @@ class SimulatorUI:
             else:
                 self.local_frontier_scatter[idx].set_offsets(np.empty((0, 2), dtype=float))
 
-            packets = robot.received_packets
-            packet_xy_list = [xy for xy, _ts in robot.shared_pose_memory.values()]
-            packet_tgt_list = [xy for xy, _ts in robot.shared_target_memory.values()]
+            pose_ids = list(robot.shared_pose_memory.keys())
+            target_ids = list(robot.shared_target_memory.keys())
+            packet_xy_list = [robot.shared_pose_memory[rid][0] for rid in pose_ids]
+            packet_tgt_list = [robot.shared_target_memory[rid][0] for rid in target_ids]
             packet_xy = np.asarray(packet_xy_list, dtype=float).reshape((-1, 2)) if packet_xy_list else np.empty((0, 2), dtype=float)
             packet_tgt = np.asarray(packet_tgt_list, dtype=float).reshape((-1, 2)) if packet_tgt_list else np.empty((0, 2), dtype=float)
             self.local_packet_scatter[idx].set_offsets(packet_xy)
             self.local_target_scatter[idx].set_offsets(packet_tgt)
             if len(packet_xy):
-                pose_colors = [robot_color_by_id.get(rid, 'tab:red') for rid in robot.shared_pose_memory.keys()]
+                pose_colors = [robot_color_by_id.get(rid, 'tab:red') for rid in pose_ids]
                 self.local_packet_scatter[idx].set_edgecolors(pose_colors)
             if len(packet_tgt):
-                tgt_colors = [robot_color_by_id.get(rid, 'tab:red') for rid in robot.shared_target_memory.keys()]
+                tgt_colors = [robot_color_by_id.get(rid, 'tab:red') for rid in target_ids]
                 self.local_target_scatter[idx].set_color(tgt_colors)
 
             keypoints = []
             key_colors = []
-            for rid, pts in robot.shared_path_memory.items():
-                for px, py, _ts in pts:
+            for rid, pts in robot.shared_keypoint_memory.items():
+                for px, py in pts:
                     keypoints.append((px, py))
                     key_colors.append(robot_color_by_id.get(rid, '#ef4444'))
             if keypoints:
@@ -530,13 +552,28 @@ class SimulatorUI:
                 if other.robot_id == robot.robot_id:
                     line.set_data([], [])
                     continue
-                pkt = next((p for p in packets if p.robot_id == other.robot_id), None)
-                if pkt is None or len(pkt.path_xy) < 2:
+                remembered_path = robot.shared_path_memory.get(other.robot_id, [])
+                mem_state = robot.shared_memory_state.get(other.robot_id, {})
+                line.set_alpha(0.30 if mem_state.get('is_stale', False) else 0.72)
+                line.set_linestyle(':') if mem_state.get('is_stale', False) else line.set_linestyle('--')
+                if len(remembered_path) < 2:
                     line.set_data([], [])
+                else:
+                    xs = [p[0] for p in remembered_path]
+                    ys = [p[1] for p in remembered_path]
+                    line.set_data(xs, ys)
+
+            for j, ell in enumerate(self.local_teammate_cov_ellipses[idx]):
+                if j >= len(self.sim.robots):
+                    ell.set_visible(False)
                     continue
-                xs = [p[0] for p in pkt.path_xy]
-                ys = [p[1] for p in pkt.path_xy]
-                line.set_data(xs, ys)
+                other = self.sim.robots[j]
+                if other.robot_id == robot.robot_id or other.robot_id not in robot.shared_pose_memory:
+                    ell.set_visible(False)
+                    continue
+                pose_xy, pose_cov, _ts = robot.shared_pose_memory[other.robot_id]
+                self._set_covariance_ellipse(ell, pose_xy[0], pose_xy[1], pose_cov[:2, :2])
+                ell.set_visible(True)
 
             known_pct = 100.0 * float(np.mean(robot.local_map.data != UNKNOWN))
             frontier_cells = int(frontier.sum())
@@ -546,12 +583,15 @@ class SimulatorUI:
             hops = '-' if robot.home_hops is None else str(robot.home_hops)
             err = float(np.hypot(robot.x - robot.x_est, robot.y - robot.y_est))
             shared_pose_n = len(robot.shared_pose_memory)
-            shared_key_n = sum(len(v) for v in robot.shared_path_memory.values())
+            shared_path_n = sum(len(v) for v in robot.shared_path_memory.values())
+            shared_key_n = sum(len(v) for v in robot.shared_keypoint_memory.values())
+            stale_n = sum(1 for v in robot.shared_memory_state.values() if v.get('is_stale', False))
+            known_landmark_n = len([info for info in robot.known_landmark_beliefs().values() if not bool(info.get('is_home', False))])
             self.local_texts[idx].set_text(
                 f'{robot.name}\n'
                 f'known {known_pct:4.1f}%   frontier {frontier_cells}   pkts {len(robot.received_packets)}\n'
-                f'shared pose {shared_pose_n}   shared keypts {shared_key_n}   motion {robot.motion_state}\n'
-                f'home {home_state}   hops {hops}   nbrs {len(robot.direct_neighbors)}\n'
+                f'remembered pose {shared_pose_n}   pathpts {shared_path_n}   keypts {shared_key_n}   motion {robot.motion_state}\n'
+                f'home {home_state}   hops {hops}   nbrs {len(robot.direct_neighbors)}   lm-bel {known_landmark_n}\n'
                 f'true ({robot.x:4.1f},{robot.y:4.1f})   est ({robot.x_est:4.1f},{robot.y_est:4.1f})\n'
                 f'err {err:4.2f}m   tr(Pxy) {robot.covariance_trace():4.2f}   lm {robot.last_landmark_updates}   team {robot.last_teammate_updates}\n'
                 f'goal {cur_tgt}   {score_text}'
