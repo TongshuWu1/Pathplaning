@@ -3,8 +3,8 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True)
 class SimConfig:
-    world_w: float = 30.0
-    world_h: float = 20.0
+    world_w: float = 40.0
+    world_h: float = 28.0
     dt: float = 0.10
     fps_ms: int = 100
     seed: int = 24
@@ -30,6 +30,13 @@ class SimConfig:
     planner_unknown_edge_penalty: float = 0.30
     frontier_replan_period: float = 1.2
     target_hold_time: float = 2.0
+
+    frontier_region_claim_radius: float = 4.5
+    frontier_region_claim_penalty: float = 55.0
+    frontier_region_same_cycle_penalty: float = 75.0
+    frontier_region_switch_penalty: float = 18.0
+    frontier_region_stay_bonus: float = 10.0
+    frontier_region_hold_time: float = 4.0
 
     comm_radius: float = 9.0
     teammate_packet_path_points: int = 96
@@ -59,26 +66,26 @@ class SimConfig:
     home_base_padding: float = 0.55
     start_spacing: float = 1.25
 
-    obstacle_count: int = 7
-    landmark_count: int = 4
+    obstacle_count: int = 15
+    landmark_count: int = 18
     obstacle_size_min: float = 1.3
     obstacle_size_max: float = 4.2
-    obstacle_gap_margin: float = 0.9
+    obstacle_gap_margin: float = 0.45
     world_margin: float = 1.0
     spawn_clear_radius: float = 4.8
 
     landmark_obs_range: float = 8.5
     landmark_range_noise: float = 0.10
     landmark_bearing_noise_deg: float = 3.0
-    teammate_obs_range: float = 12.0
+    teammate_obs_range: float = 9.0
     teammate_range_noise: float = 0.18
     teammate_bearing_noise_deg: float = 5.0
     teammate_covariance_gain: float = 0.55
     teammate_age_noise_gain: float = 0.10
 
-    odom_trans_noise: float = 0.02
+    odom_trans_noise: float = 0.03
     odom_rot_noise_deg: float = 2.0
-    process_xy_noise: float = 0.015
+    process_xy_noise: float = 0.02
     process_theta_noise_deg: float = 1.4
 
     local_view_alpha: float = 0.88

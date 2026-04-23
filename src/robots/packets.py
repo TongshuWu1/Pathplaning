@@ -26,6 +26,8 @@ class KnowledgeSnapshot:
     pose_xy: Tuple[float, float]
     pose_cov: np.ndarray
     target_xy: Optional[Tuple[float, float]]
+    current_region_id: Optional[int] = None
+    current_region_center_xy: Optional[Tuple[float, float]] = None
     home_connected: bool = False
     home_hops: Optional[int] = None
     direct_neighbors: List[int] = field(default_factory=list)

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import List, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 import heapq
 import math
 import numpy as np
@@ -11,17 +11,38 @@ from .robots.packets import TeammatePacket
 
 
 @dataclass
+class FrontierRegion:
+    region_id: int
+    centroid_xy: Tuple[float, float]
+    frontier_size: int
+    target_xy: Tuple[float, float]
+    travel_cost: float
+    info_gain: float
+    overlap_penalty: float
+    claim_penalty: float
+    switch_penalty: float
+    stay_bonus: float
+
+
+@dataclass
 class FrontierChoice:
     target_xy: Tuple[float, float]
     score: float
     info_gain: float
     travel_cost: float
     overlap_penalty: float
+    region_id: int
+    region_center_xy: Tuple[float, float]
+    claim_penalty: float = 0.0
+    switch_penalty: float = 0.0
+    stay_bonus: float = 0.0
 
 
 class LocalFrontierPolicy:
     def __init__(self, grid: OccupancyGrid, sensing_radius: float, trace_radius: float, trace_gain: float,
-                 current_pos_gain: float, target_gain: float, decay_s: float):
+                 current_pos_gain: float, target_gain: float, decay_s: float,
+                 claim_radius: float = 4.5, claim_penalty: float = 55.0, same_cycle_penalty: float = 75.0,
+                 switch_penalty: float = 18.0, stay_bonus: float = 10.0):
         self.grid = grid
         self.sensing_radius = sensing_radius
         self.trace_radius = trace_radius
@@ -29,9 +50,16 @@ class LocalFrontierPolicy:
         self.current_pos_gain = current_pos_gain
         self.target_gain = target_gain
         self.decay_s = decay_s
+        self.claim_radius = claim_radius
+        self.claim_penalty = claim_penalty
+        self.same_cycle_penalty = same_cycle_penalty
+        self.switch_penalty_value = switch_penalty
+        self.stay_bonus_value = stay_bonus
 
     def choose_target(self, now: float, local_map: np.ndarray, robot_xy: Tuple[float, float],
-                      teammate_packets: Sequence[TeammatePacket], planner) -> Optional[FrontierChoice]:
+                      teammate_packets: Sequence[TeammatePacket], planner,
+                      current_region_id: Optional[int] = None, region_hold_active: bool = False,
+                      provisional_claims: Optional[Dict[int, Tuple[float, float]]] = None) -> Optional[FrontierChoice]:
         mask = frontier_mask(local_map)
         comps = connected_components(mask, min_size=5)
         if not comps:
@@ -39,24 +67,89 @@ class LocalFrontierPolicy:
         blocked = planner.inflated_mask(local_map)
         dist_grid = self._reachable_distances(robot_xy, blocked)
         trace_field = self._trace_penalty_field(now, teammate_packets)
+        regions = self._build_regions(comps, dist_grid, local_map, trace_field)
+        if not regions:
+            return None
+        claimed = self._collect_claims(teammate_packets, provisional_claims or {})
         best: Optional[FrontierChoice] = None
-        for comp in comps:
+        for region in regions:
+            claim_penalty = self._claim_penalty(region.centroid_xy, region.region_id, claimed, current_region_id)
+            switch_penalty = 0.0
+            stay_bonus = 0.0
+            if current_region_id is not None:
+                if region.region_id == current_region_id:
+                    stay_bonus = self.stay_bonus_value
+                elif region_hold_active:
+                    switch_penalty = self.switch_penalty_value
+            score = 1.35 * region.info_gain - 0.70 * region.travel_cost - 1.0 * region.overlap_penalty - claim_penalty - switch_penalty + stay_bonus
+            choice = FrontierChoice(
+                target_xy=region.target_xy,
+                score=score,
+                info_gain=region.info_gain,
+                travel_cost=region.travel_cost,
+                overlap_penalty=region.overlap_penalty,
+                region_id=region.region_id,
+                region_center_xy=region.centroid_xy,
+                claim_penalty=claim_penalty,
+                switch_penalty=switch_penalty,
+                stay_bonus=stay_bonus,
+            )
+            if best is None or choice.score > best.score:
+                best = choice
+        return best
+
+    def _build_regions(self, comps, dist_grid, local_map, trace_field) -> List[FrontierRegion]:
+        regions: List[FrontierRegion] = []
+        for idx, comp in enumerate(comps):
             cx = sum(c[0] for c in comp) / len(comp)
             cy = sum(c[1] for c in comp) / len(comp)
             target = self._find_reachable_standoff((cx, cy), dist_grid, local_map)
             if target is None:
                 continue
             tx, ty = target
-            info_gain = self._unknown_gain_around(target, local_map)
+            info_gain = self._unknown_gain_around(target, local_map) + 0.15 * len(comp)
             gx, gy = self.grid.world_to_grid(tx, ty)
             travel_cost = float(dist_grid[gy, gx]) * self.grid.res
             overlap = float(trace_field[gy, gx])
-            score = 1.35 * info_gain - 0.70 * travel_cost - 1.0 * overlap
-            choice = FrontierChoice(target_xy=target, score=score, info_gain=info_gain,
-                                    travel_cost=travel_cost, overlap_penalty=overlap)
-            if best is None or choice.score > best.score:
-                best = choice
-        return best
+            centroid_xy = self.grid.grid_to_world(int(round(cx)), int(round(cy)))
+            regions.append(FrontierRegion(
+                region_id=idx,
+                centroid_xy=centroid_xy,
+                frontier_size=len(comp),
+                target_xy=target,
+                travel_cost=travel_cost,
+                info_gain=info_gain,
+                overlap_penalty=overlap,
+                claim_penalty=0.0,
+                switch_penalty=0.0,
+                stay_bonus=0.0,
+            ))
+        return regions
+
+    def _collect_claims(self, teammate_packets: Sequence[TeammatePacket], provisional_claims: Dict[int, Tuple[float, float]]):
+        claimed: Dict[int, Tuple[Optional[int], Tuple[float, float], str]] = {}
+        for rid, center in provisional_claims.items():
+            claimed[rid] = (None, center, 'provisional')
+        for packet in teammate_packets:
+            snap = packet.self_snapshot
+            if snap is None or snap.current_region_center_xy is None:
+                continue
+            claimed[packet.robot_id] = (snap.current_region_id, snap.current_region_center_xy, 'teammate')
+        return claimed
+
+    def _claim_penalty(self, region_center_xy, region_id, claimed, current_region_id):
+        penalty = 0.0
+        for rid, (claimed_region_id, claimed_center_xy, source_kind) in claimed.items():
+            if claimed_center_xy is None:
+                continue
+            d = math.hypot(region_center_xy[0] - claimed_center_xy[0], region_center_xy[1] - claimed_center_xy[1])
+            if d > self.claim_radius:
+                continue
+            if current_region_id is not None and claimed_region_id == current_region_id:
+                continue
+            w = self.same_cycle_penalty if source_kind == 'provisional' else self.claim_penalty
+            penalty += w * max(0.1, 1.0 - d / max(self.claim_radius, 1e-6))
+        return penalty
 
     def _reachable_distances(self, robot_xy: Tuple[float, float], blocked: np.ndarray) -> np.ndarray:
         sx, sy = self.grid.world_to_grid(*robot_xy)

@@ -34,6 +34,10 @@ class Robot:
     cfg: SimConfig
     local_map: OccupancyGrid
     current_target: Optional[Tuple[float, float]] = None
+    current_region_id: Optional[int] = None
+    current_region_center_xy: Optional[Tuple[float, float]] = None
+    region_hold_until: float = -1e9
+    last_region_switch_time: float = -1e9
     current_path: List[Tuple[float, float]] = field(default_factory=list)
     path_history: List[Tuple[float, float]] = field(default_factory=list)
     est_path_history: List[Tuple[float, float]] = field(default_factory=list)
@@ -244,6 +248,8 @@ class Robot:
             pose_xy=(self.x_est, self.y_est),
             pose_cov=self.P.copy(),
             target_xy=self.current_target,
+            current_region_id=self.current_region_id,
+            current_region_center_xy=self.current_region_center_xy,
             home_connected=bool(self.home_connected),
             home_hops=self.home_hops,
             direct_neighbors=list(self.direct_neighbors),
@@ -291,6 +297,8 @@ class Robot:
                 'pose_xy': [float(rec.pose_xy[0]), float(rec.pose_xy[1])],
                 'pose_cov': np.array(rec.pose_cov, copy=True),
                 'target_xy': None if rec.target_xy is None else [float(rec.target_xy[0]), float(rec.target_xy[1])],
+                'current_region_id': rec.current_region_id,
+                'current_region_center_xy': None if rec.current_region_center_xy is None else [float(rec.current_region_center_xy[0]), float(rec.current_region_center_xy[1])],
                 'home_connected': bool(rec.home_connected),
                 'home_hops': rec.home_hops,
                 'direct_neighbors': list(rec.direct_neighbors),
@@ -316,6 +324,8 @@ class Robot:
                 'pose_cov': self.P.copy(),
                 'cov_trace': float(self.covariance_trace()),
                 'target_xy': None if self.current_target is None else [float(self.current_target[0]), float(self.current_target[1])],
+                'current_region_id': self.current_region_id,
+                'current_region_center_xy': None if self.current_region_center_xy is None else [float(self.current_region_center_xy[0]), float(self.current_region_center_xy[1])],
                 'home_connected': bool(self.home_connected),
                 'home_hops': self.home_hops,
                 'direct_neighbors': list(self.direct_neighbors),

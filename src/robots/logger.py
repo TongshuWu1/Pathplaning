@@ -37,7 +37,7 @@ class RobotLogger:
         lines.append(f"robot {snapshot.get('robot_id')} knowledge @ t={snapshot.get('time_s', 0.0):.2f}")
         self_info = snapshot.get('self', {})
         lines.append('self:')
-        lines.append(f"  pose_est={self_info.get('pose_est_xy')} cov_trace={self_info.get('cov_trace')} target={self_info.get('target_xy')}")
+        lines.append(f"  pose_est={self_info.get('pose_est_xy')} cov_trace={self_info.get('cov_trace')} target={self_info.get('target_xy')} region={self_info.get('current_region_id')}")
         lines.append(f"  home_connected={self_info.get('home_connected')} home_hops={self_info.get('home_hops')} direct_neighbors={self_info.get('direct_neighbors')}")
         lines.append(f"  landmarks={sorted((self_info.get('landmarks') or {}).keys())}")
         teammates = snapshot.get('teammates', {})
@@ -48,7 +48,7 @@ class RobotLogger:
             for key in sorted(teammates.keys(), key=lambda x: int(x)):
                 info = teammates[key]
                 lines.append(
-                    f"  robot {key}: pose={info.get('pose_xy')} stale={info.get('is_stale')} age_s={info.get('age_s')} "
+                    f"  robot {key}: pose={info.get('pose_xy')} region={info.get('current_region_id')} stale={info.get('is_stale')} age_s={info.get('age_s')} "
                     f"source={info.get('source_robot_id')} route_points={info.get('route_point_count')} recent_points={info.get('recent_point_count')} "
                     f"landmarks={sorted((info.get('landmarks') or {}).keys())}"
                 )

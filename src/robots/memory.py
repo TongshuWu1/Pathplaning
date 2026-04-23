@@ -17,6 +17,8 @@ class TeammateMemoryRecord:
     pose_xy: Tuple[float, float] = (0.0, 0.0)
     pose_cov: np.ndarray = field(default_factory=lambda: np.eye(3))
     target_xy: Optional[Tuple[float, float]] = None
+    current_region_id: Optional[int] = None
+    current_region_center_xy: Optional[Tuple[float, float]] = None
     home_connected: bool = False
     home_hops: Optional[int] = None
     direct_neighbors: List[int] = field(default_factory=list)
@@ -77,6 +79,8 @@ class TeammateMemoryStore:
         rec.pose_xy = (float(snap.pose_xy[0]), float(snap.pose_xy[1]))
         rec.pose_cov = np.array(snap.pose_cov, copy=True)
         rec.target_xy = None if snap.target_xy is None else (float(snap.target_xy[0]), float(snap.target_xy[1]))
+        rec.current_region_id = None if snap.current_region_id is None else int(snap.current_region_id)
+        rec.current_region_center_xy = None if snap.current_region_center_xy is None else (float(snap.current_region_center_xy[0]), float(snap.current_region_center_xy[1]))
         rec.home_connected = bool(snap.home_connected)
         rec.home_hops = None if snap.home_hops is None else int(snap.home_hops)
         rec.direct_neighbors = [int(v) for v in snap.direct_neighbors]
@@ -105,6 +109,8 @@ class TeammateMemoryStore:
                     pose_xy=(float(rec.pose_xy[0]), float(rec.pose_xy[1])),
                     pose_cov=np.array(rec.pose_cov, copy=True),
                     target_xy=rec.target_xy,
+                    current_region_id=rec.current_region_id,
+                    current_region_center_xy=rec.current_region_center_xy,
                     home_connected=rec.home_connected,
                     home_hops=rec.home_hops,
                     direct_neighbors=list(rec.direct_neighbors),

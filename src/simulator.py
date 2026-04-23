@@ -64,6 +64,11 @@ class Simulator:
             current_pos_gain=self.cfg.teammate_current_pos_gain,
             target_gain=self.cfg.teammate_target_gain,
             decay_s=self.cfg.teammate_trace_decay_s,
+            claim_radius=self.cfg.frontier_region_claim_radius,
+            claim_penalty=self.cfg.frontier_region_claim_penalty,
+            same_cycle_penalty=self.cfg.frontier_region_same_cycle_penalty,
+            switch_penalty=self.cfg.frontier_region_switch_penalty,
+            stay_bonus=self.cfg.frontier_region_stay_bonus,
         )
         self.robots = []
         run_dir = self._make_run_dir()
@@ -148,6 +153,7 @@ class Simulator:
             robot.update_localization(all_landmarks, robots_by_id, self.world.obstacles, self.time_s)
             robot.update_map(beams)
 
+        provisional_claims = {}
         for robot in self.robots:
             need_replan = (
                 robot.request_replan or
@@ -162,19 +168,29 @@ class Simulator:
                     robot.est_pose_xy(),
                     robot.received_packets,
                     self.planner,
+                    current_region_id=robot.current_region_id,
+                    region_hold_active=(self.time_s < robot.region_hold_until),
+                    provisional_claims=provisional_claims,
                 )
                 if choice is not None:
                     path = self.planner.plan(robot.est_pose_xy(), choice.target_xy, robot.local_map.data)
                     if path is not None and len(path) >= 2:
+                        prev_region = robot.current_region_id
                         robot.current_target = choice.target_xy
                         robot.current_path = path[1:]
                         robot.last_plan_time = self.time_s
                         robot.last_target_time = self.time_s
                         robot.request_replan = False
+                        robot.current_region_id = choice.region_id
+                        robot.current_region_center_xy = choice.region_center_xy
+                        robot.region_hold_until = self.time_s + self.cfg.frontier_region_hold_time
+                        if prev_region != choice.region_id:
+                            robot.last_region_switch_time = self.time_s
+                        provisional_claims[robot.robot_id] = choice.region_center_xy
                         robot.logger.log(self.time_s, 'replan', target_xy=choice.target_xy, score=choice.score, info_gain=choice.info_gain, travel_cost=choice.travel_cost, overlap_penalty=choice.overlap_penalty)
                         robot.last_choice_debug = (
-                            f'gain={choice.info_gain:4.0f} cost={choice.travel_cost:4.1f}\n'
-                            f'overlap={choice.overlap_penalty:4.1f} score={choice.score:5.1f}'
+                            f'reg={choice.region_id} gain={choice.info_gain:4.0f} cost={choice.travel_cost:4.1f}\n'
+                            f'ov={choice.overlap_penalty:4.1f} claim={choice.claim_penalty:4.1f} score={choice.score:5.1f}'
                         )
                         self.replan_count += 1
                 elif robot.request_replan:

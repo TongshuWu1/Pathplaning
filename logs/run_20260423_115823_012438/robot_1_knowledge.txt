@@ -1,9 +1,0 @@
-robot 1 knowledge @ t=28.50
-self:
-  pose_est=[7.348724245992765, 9.839605106243827] cov_trace=0.00024348560158880323 target=None
-  home_connected=True home_hops=0 direct_neighbors=[]
-  landmarks=['Home', 'L3', 'L4']
-teammates:
-  robot 0: pose=[13.673697823359998, 11.27805081645069] stale=False age_s=4.20000000000006 source=0 route_points=48 recent_points=48 landmarks=['Home', 'L1', 'L3', 'L4']
-  robot 2: pose=[7.746051029711346, 12.198324144952478] stale=False age_s=4.20000000000006 source=2 route_points=46 recent_points=48 landmarks=['Home', 'L3', 'L4']
-  robot 3: pose=[14.60249594835083, 11.25330757979031] stale=False age_s=4.20000000000006 source=3 route_points=48 recent_points=48 landmarks=['Home', 'L1', 'L3', 'L4']

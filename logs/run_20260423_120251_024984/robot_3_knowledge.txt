@@ -1,6 +1,0 @@
-robot 3 knowledge @ t=0.00
-self:
-  pose_est=[3.5700000000000003, 3.5700000000000003] cov_trace=0.2 target=None
-  home_connected=True home_hops=0 direct_neighbors=[0, 1, 2]
-  landmarks=[]
-teammates: none

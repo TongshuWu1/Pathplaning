@@ -1,2 +1,0 @@
-robot_count=4
-seed=24
