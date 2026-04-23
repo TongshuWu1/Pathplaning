@@ -1,0 +1,65 @@
+{
+  "time_s": 0.0,
+  "robot_id": 0,
+  "self": {
+    "pose_est_xy": [
+      0.8300000000000001,
+      0.8300000000000001
+    ],
+    "heading_est_deg": 0.0,
+    "pose_cov": [
+      [
+        0.1,
+        0.0,
+        0.0
+      ],
+      [
+        0.0,
+        0.1,
+        0.0
+      ],
+      [
+        0.0,
+        0.0,
+        0.01096622711232151
+      ]
+    ],
+    "cov_trace": 0.2,
+    "target_xy": null,
+    "home_connected": true,
+    "home_hops": 0,
+    "direct_neighbors": [
+      1,
+      2,
+      3
+    ],
+    "reachable_peer_ids": [
+      1,
+      2,
+      3
+    ],
+    "route_point_count": 1,
+    "recent_point_count": 1,
+    "semantic_point_count": 1,
+    "landmarks": {},
+    "path_xy": [
+      [
+        0.8300000000000001,
+        0.8300000000000001
+      ]
+    ],
+    "recent_trail_xy": [
+      [
+        0.8300000000000001,
+        0.8300000000000001
+      ]
+    ],
+    "semantic_points_xy": [
+      [
+        0.8300000000000001,
+        0.8300000000000001
+      ]
+    ]
+  },
+  "teammates": {}
+}
