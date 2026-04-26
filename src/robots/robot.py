@@ -34,6 +34,7 @@ class Robot:
     cfg: SimConfig
     local_map: OccupancyGrid
     current_target: Optional[Tuple[float, float]] = None
+    current_mode: str = 'idle'
     current_region_id: Optional[int] = None
     current_region_center_xy: Optional[Tuple[float, float]] = None
     region_hold_until: float = -1e9
@@ -324,6 +325,7 @@ class Robot:
                 'pose_cov': self.P.copy(),
                 'cov_trace': float(self.covariance_trace()),
                 'target_xy': None if self.current_target is None else [float(self.current_target[0]), float(self.current_target[1])],
+                'current_mode': self.current_mode,
                 'current_region_id': self.current_region_id,
                 'current_region_center_xy': None if self.current_region_center_xy is None else [float(self.current_region_center_xy[0]), float(self.current_region_center_xy[1])],
                 'home_connected': bool(self.home_connected),

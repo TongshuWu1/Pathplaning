@@ -62,11 +62,13 @@ class GridPlanner:
             return True
         return any(circle_intersects_rect(x, y, self.robot_radius, obs) for obs in self.world_obstacles)
 
-    def plan(self, start_xy: Tuple[float, float], goal_xy: Tuple[float, float], local_map: np.ndarray) -> Optional[List[Tuple[float, float]]]:
+    def plan(self, start_xy: Tuple[float, float], goal_xy: Tuple[float, float], local_map: np.ndarray,
+             blocked: Optional[np.ndarray] = None, clearance: Optional[np.ndarray] = None) -> Optional[List[Tuple[float, float]]]:
         self.last_plan_stats = PlanStats()
         sx, sy = self.grid.world_to_grid(*start_xy)
         gx, gy = self.grid.world_to_grid(*goal_xy)
-        blocked = self.inflated_mask(local_map)
+        if blocked is None:
+            blocked = self.inflated_mask(local_map)
         if blocked[sy, sx]:
             blocked[sy, sx] = False
         if blocked[gy, gx]:
@@ -74,7 +76,8 @@ class GridPlanner:
             if found is None:
                 return None
             gx, gy = found
-        clearance = self._clearance_map(blocked)
+        if clearance is None:
+            clearance = self._clearance_map(blocked)
         start = (sx, sy)
         goal = (gx, gy)
         pq: List[Tuple[float, Tuple[int, int]]] = []

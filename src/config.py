@@ -38,6 +38,13 @@ class SimConfig:
     frontier_region_stay_bonus: float = 10.0
     frontier_region_hold_time: float = 4.0
 
+    decision_min_route_clearance: float = 0.24
+    decision_max_predicted_cov_trace: float = 2.8
+    decision_covariance_growth_per_m: float = 0.055
+    decision_disconnect_explore_margin: float = 1.2
+    decision_return_path_factor: float = 1.8
+    decision_max_frontier_candidates: int = 10
+
     comm_radius: float = 9.0
     teammate_packet_path_points: int = 96
     teammate_packet_recent_points: int = 20

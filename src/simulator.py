@@ -69,6 +69,12 @@ class Simulator:
             same_cycle_penalty=self.cfg.frontier_region_same_cycle_penalty,
             switch_penalty=self.cfg.frontier_region_switch_penalty,
             stay_bonus=self.cfg.frontier_region_stay_bonus,
+            min_route_clearance=self.cfg.decision_min_route_clearance,
+            max_predicted_cov_trace=self.cfg.decision_max_predicted_cov_trace,
+            covariance_growth_per_m=self.cfg.decision_covariance_growth_per_m,
+            disconnect_explore_margin=self.cfg.decision_disconnect_explore_margin,
+            return_path_factor=self.cfg.decision_return_path_factor,
+            max_frontier_candidates=self.cfg.decision_max_frontier_candidates,
         )
         self.robots = []
         run_dir = self._make_run_dir()
@@ -162,39 +168,60 @@ class Simulator:
                 ((self.time_s - robot.last_target_time) >= self.cfg.target_hold_time and not robot.current_path)
             )
             if need_replan:
-                choice = self.policy.choose_target(
+                choice = self.policy.choose_route(
                     self.time_s,
                     robot.local_map.data,
                     robot.est_pose_xy(),
                     robot.received_packets,
                     self.planner,
+                    robot_cov_trace=robot.covariance_trace(),
+                    home_xy=(self.world.home_marker.x, self.world.home_marker.y),
+                    home_connected=robot.home_connected,
+                    home_hops=robot.home_hops,
+                    current_mode=robot.current_mode,
                     current_region_id=robot.current_region_id,
                     region_hold_active=(self.time_s < robot.region_hold_until),
                     provisional_claims=provisional_claims,
                 )
-                if choice is not None:
-                    path = self.planner.plan(robot.est_pose_xy(), choice.target_xy, robot.local_map.data)
-                    if path is not None and len(path) >= 2:
-                        prev_region = robot.current_region_id
-                        robot.current_target = choice.target_xy
-                        robot.current_path = path[1:]
-                        robot.last_plan_time = self.time_s
-                        robot.last_target_time = self.time_s
-                        robot.request_replan = False
-                        robot.current_region_id = choice.region_id
-                        robot.current_region_center_xy = choice.region_center_xy
-                        robot.region_hold_until = self.time_s + self.cfg.frontier_region_hold_time
-                        if prev_region != choice.region_id:
-                            robot.last_region_switch_time = self.time_s
+                if choice is not None and choice.path_xy and len(choice.path_xy) >= 2:
+                    prev_region = robot.current_region_id
+                    robot.current_target = choice.target_xy
+                    robot.current_path = choice.path_xy[1:]
+                    robot.current_mode = choice.mode
+                    robot.last_plan_time = self.time_s
+                    robot.last_target_time = self.time_s
+                    robot.request_replan = False
+                    robot.current_region_id = choice.region_id
+                    robot.current_region_center_xy = choice.region_center_xy
+                    robot.region_hold_until = self.time_s + self.cfg.frontier_region_hold_time
+                    if prev_region != choice.region_id:
+                        robot.last_region_switch_time = self.time_s
+                    if choice.region_center_xy is not None:
                         provisional_claims[robot.robot_id] = choice.region_center_xy
-                        robot.logger.log(self.time_s, 'replan', target_xy=choice.target_xy, score=choice.score, info_gain=choice.info_gain, travel_cost=choice.travel_cost, overlap_penalty=choice.overlap_penalty)
-                        robot.last_choice_debug = (
-                            f'reg={choice.region_id} gain={choice.info_gain:4.0f} cost={choice.travel_cost:4.1f}\n'
-                            f'ov={choice.overlap_penalty:4.1f} claim={choice.claim_penalty:4.1f} score={choice.score:5.1f}'
-                        )
-                        self.replan_count += 1
+                    robot.logger.log(
+                        self.time_s,
+                        'replan',
+                        mode=choice.mode,
+                        target_xy=choice.target_xy,
+                        score=choice.score,
+                        info_gain=choice.info_gain,
+                        travel_cost=choice.travel_cost,
+                        overlap_penalty=choice.overlap_penalty,
+                        chain_score=choice.chain_score,
+                        return_score=choice.return_score,
+                        localization_score=choice.localization_score,
+                        feasible=choice.feasible,
+                        reject_reason=choice.reject_reason,
+                    )
+                    feasibility = 'ok' if choice.feasible else f'rej:{choice.reject_reason}'
+                    robot.last_choice_debug = (
+                        f'{choice.mode} {choice.region_label} {feasibility}\n'
+                        f'g={choice.info_gain:4.0f} c={choice.travel_cost:4.1f} clr={choice.min_clearance_m:3.2f} sc={choice.score:5.1f}'
+                    )
+                    self.replan_count += 1
                 elif robot.request_replan:
-                    robot.last_choice_debug = 'replan requested\nno frontier selected'
+                    robot.current_mode = 'idle'
+                    robot.last_choice_debug = 'replan requested\nno feasible route selected'
                     robot.request_replan = False
             robot.follow_path(self.cfg.dt, self.world.obstacles, now=self.time_s)
 
