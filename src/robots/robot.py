@@ -51,6 +51,24 @@ class Robot:
     blocked_steps: int = 0
     request_replan: bool = False
     motion_state: str = 'idle'
+    # Temporary route-level avoidance memory.  Each tuple is
+    # (x, y, expire_time_s).  The simulator injects these as virtual blocked
+    # disks in planning maps so a stuck robot tries another route instead of
+    # repeating the same collision.
+    route_block_zones: List[Tuple[float, float, float]] = field(default_factory=list)
+    last_route_block_time: float = -1e9
+    route_recovery_count: int = 0
+    last_recovery_debug: str = ''
+    help_request_active: bool = False
+    help_request_xy: Optional[Tuple[float, float]] = None
+    help_request_time: float = -1e9
+    help_request_reason: str = ''
+    help_assigned_helper_id: Optional[int] = None
+    help_stable_steps: int = 0
+    help_target_robot_id: Optional[int] = None
+    help_assigned_at: float = -1e9
+    help_arrived_time: float = -1e9
+    help_status: str = ''
     direct_neighbors: List[int] = field(default_factory=list)
     reachable_peer_ids: List[int] = field(default_factory=list)
     home_connected: bool = False
@@ -64,6 +82,11 @@ class Robot:
     last_landmark_updates: int = 0
     last_teammate_updates: int = 0
     last_loc_debug: str = ''
+    localization_safety_state: str = 'nominal'
+    safety_debug: str = ''
+    last_landmark_seen_time: float = 0.0
+    last_home_seen_time: float = 0.0
+    last_absolute_update_time: float = 0.0
     landmark_ids_used: List[str] = field(default_factory=list)
     shared_pose_memory: dict[int, PoseMemory] = field(default_factory=dict)
     shared_target_memory: dict[int, Tuple[Tuple[float, float], float]] = field(default_factory=dict)
@@ -107,7 +130,12 @@ class Robot:
         self.packet_seq = 0
         self.prev_home_connected = self.home_connected
         self.prev_landmark_visible = False
-        self.logger.write_snapshot(self.knowledge_snapshot(0.0))
+        self.last_landmark_seen_time = 0.0
+        self.last_home_seen_time = 0.0
+        self.last_absolute_update_time = 0.0
+        self.localization_safety_state = 'nominal'
+        self.safety_debug = ''
+        self.logger.write_snapshot(self.knowledge_snapshot(0.0), now=0.0, force=True)
 
     @property
     def nav_keypoints_history(self) -> List[Tuple[float, float]]:
@@ -121,6 +149,135 @@ class Robot:
 
     def covariance_trace(self) -> float:
         return float(np.trace(self.P[:2, :2]))
+
+    def prune_route_blocks(self, now: Optional[float]) -> None:
+        if now is None:
+            return
+        self.route_block_zones = [
+            (float(x), float(y), float(expire))
+            for x, y, expire in self.route_block_zones
+            if float(expire) > float(now)
+        ]
+
+    def active_route_blocks(self, now: Optional[float]) -> List[Tuple[float, float, float]]:
+        self.prune_route_blocks(now)
+        return list(self.route_block_zones)
+
+    def record_route_block(self, x: float, y: float, now: Optional[float]) -> bool:
+        """Remember a failed local approach for temporary replanning.
+
+        This is intentionally not written into the occupancy grid.  It is a
+        short-lived planning memory that says: do not immediately try this same
+        corridor again.
+        """
+        if not bool(getattr(self.cfg, 'stuck_route_replan_enabled', True)) or now is None:
+            return False
+        now_f = float(now)
+        if now_f - float(self.last_route_block_time) < float(getattr(self.cfg, 'stuck_route_replan_cooldown_s', 0.0)):
+            return False
+        x = max(0.0, min(float(getattr(self.cfg, 'world_w', x)), float(x)))
+        y = max(0.0, min(float(getattr(self.cfg, 'world_h', y)), float(y)))
+        self.prune_route_blocks(now_f)
+        min_sep = float(getattr(self.cfg, 'stuck_route_min_separation_m', 0.5))
+        for bx, by, _expire in self.route_block_zones:
+            if math.hypot(bx - x, by - y) < min_sep:
+                self.last_route_block_time = now_f
+                return False
+        expire = now_f + float(getattr(self.cfg, 'stuck_route_block_duration_s', 18.0))
+        self.route_block_zones.append((x, y, expire))
+        max_blocks = max(1, int(getattr(self.cfg, 'stuck_route_max_blocks', 8)))
+        if len(self.route_block_zones) > max_blocks:
+            self.route_block_zones = self.route_block_zones[-max_blocks:]
+        self.last_route_block_time = now_f
+        self.route_recovery_count += 1
+        self.last_recovery_debug = f'avoid ({x:.1f},{y:.1f}) for {expire - now_f:.0f}s'
+        return True
+
+
+    def start_help_request(self, now: Optional[float], reason: str) -> bool:
+        if not bool(getattr(self.cfg, 'help_request_enabled', True)) or now is None:
+            return False
+        now_f = float(now)
+        if self.help_request_active:
+            # Keep the original request time so assignment timeout remains meaningful,
+            # but refresh the location/reason as the robot drifts or replans.
+            self.help_request_xy = (float(self.x_est), float(self.y_est))
+            self.help_request_reason = str(reason)
+            return False
+        self.help_request_active = True
+        self.help_request_xy = (float(self.x_est), float(self.y_est))
+        self.help_request_time = now_f
+        self.help_request_reason = str(reason)
+        self.help_stable_steps = 0
+        self.help_status = f'HELP requested: {reason}'
+        return True
+
+    def clear_help_request(self, reason: str = '') -> None:
+        self.help_request_active = False
+        self.help_request_xy = None
+        self.help_request_reason = ''
+        self.help_assigned_helper_id = None
+        self.help_stable_steps = 0
+        self.help_status = '' if not reason else f'HELP cleared: {reason}'
+
+    def assign_helper(self, helper_id: Optional[int], now: Optional[float]) -> None:
+        self.help_assigned_helper_id = None if helper_id is None else int(helper_id)
+        if helper_id is not None and now is not None:
+            self.help_status = f'HELP assigned R{int(helper_id) + 1}'
+
+    def begin_helping(self, victim_id: int, now: Optional[float]) -> None:
+        self.help_target_robot_id = int(victim_id)
+        self.help_assigned_at = float(now) if now is not None else self.help_assigned_at
+        self.help_arrived_time = -1e9
+        self.help_status = f'HELPING R{int(victim_id) + 1}'
+
+    def clear_helping(self, reason: str = '') -> None:
+        self.help_target_robot_id = None
+        self.help_assigned_at = -1e9
+        self.help_arrived_time = -1e9
+        self.help_status = '' if not reason else f'HELP done: {reason}'
+
+    def absolute_update_age(self, now: Optional[float]) -> float:
+        if now is None:
+            return 0.0
+        return max(0.0, float(now) - float(self.last_absolute_update_time))
+
+    def recent_home_seen(self, now: Optional[float]) -> bool:
+        if now is None:
+            return False
+        return (float(now) - float(self.last_home_seen_time)) <= float(self.cfg.localization_home_recent_s)
+
+    def localization_state(self, now: Optional[float]) -> str:
+        cov = self.covariance_trace()
+        age = self.absolute_update_age(now)
+        timeout = float(self.cfg.localization_no_correction_timeout_s)
+        if (
+            cov >= float(self.cfg.localization_critical_cov_trace)
+            or age >= 2.0 * timeout
+            or self.blocked_steps >= max(1, int(self.cfg.localization_stuck_replan_steps))
+        ):
+            return 'critical'
+        if cov >= float(self.cfg.localization_recovery_cov_trace) or age >= timeout:
+            return 'recover'
+        if cov >= float(self.cfg.localization_slowdown_cov_trace) or age >= 0.65 * timeout:
+            return 'caution'
+        return 'nominal'
+
+    def localization_speed_scale(self, now: Optional[float]) -> float:
+        cov = self.covariance_trace()
+        slow = float(self.cfg.localization_slowdown_cov_trace)
+        critical = max(slow + 1e-6, float(self.cfg.localization_critical_cov_trace))
+        min_scale = float(self.cfg.localization_min_speed_scale)
+        if cov <= slow:
+            cov_scale = 1.0
+        else:
+            alpha = max(0.0, min(1.0, (cov - slow) / (critical - slow)))
+            cov_scale = 1.0 - (1.0 - min_scale) * alpha
+        age = self.absolute_update_age(now)
+        timeout = float(self.cfg.localization_no_correction_timeout_s)
+        age_scale = 1.0 if age <= 0.65 * timeout else max(min_scale, 1.0 - 0.55 * min(1.0, (age - 0.65 * timeout) / max(0.35 * timeout, 1e-6)))
+        mode_scale = 0.62 if self.current_mode == 'localize' else 1.0
+        return max(min_scale, min(cov_scale, age_scale, mode_scale))
 
     def sense(self, obstacles: Sequence[RectObstacle]) -> List[ScanBeam]:
         beams: List[ScanBeam] = []
@@ -160,7 +317,11 @@ class Robot:
             ])
             if self._range_bearing_update((lm.x, lm.y), z, R, now):
                 self.last_landmark_updates += 1
+                self.last_landmark_seen_time = float(now)
+                self.last_absolute_update_time = float(now)
                 lm_name = 'Home' if lm.is_home else lm.name
+                if lm.is_home:
+                    self.last_home_seen_time = float(now)
                 self.landmark_ids_used.append(lm_name)
                 self._update_landmark_memory(lm_name, lm.is_home, z, now)
 
@@ -182,6 +343,7 @@ class Robot:
             R = np.diag([sig_r ** 2, sig_b ** 2])
             if self._range_bearing_update(packet.pose_xy, z, R, now):
                 self.last_teammate_updates += 1
+                self.last_absolute_update_time = float(now)
 
         landmark_visible = self.last_landmark_updates > 0
         if landmark_visible and not self.prev_landmark_visible:
@@ -190,13 +352,33 @@ class Robot:
             self.executed_route_memory.record_event(self.x_est, self.y_est, now, 'LANDMARK_LOSS', note='landmarks lost')
         self.prev_landmark_visible = landmark_visible
 
+        age_abs = max(0.0, float(now) - float(self.last_absolute_update_time))
+        self.localization_safety_state = self.localization_state(now)
+        self.safety_debug = f'{self.localization_safety_state} abs_age={age_abs:3.1f}s'
         self.last_loc_debug = (
-            f'loc tr(Pxy)={self.covariance_trace():4.2f}  lm={self.last_landmark_updates}  team={self.last_teammate_updates}'
+            f'loc tr(Pxy)={self.covariance_trace():4.2f}  lm={self.last_landmark_updates}  '
+            f'team={self.last_teammate_updates}  safe={self.localization_safety_state}  abs={age_abs:3.1f}s'
         )
 
     def update_map(self, beams: Sequence[ScanBeam]) -> None:
-        self.local_map.reveal_disk(self.x_est, self.y_est, radius=self.cfg.robot_radius * 1.5)
+        # Keep a small free bubble around the estimated body.  With obstacle
+        # inflation enabled, a too-small bubble can isolate the robot inside
+        # UNKNOWN/OCCUPIED cells after localization drift, making all frontiers
+        # look unreachable and causing the robot to idle.
+        body_clear_radius = max(0.85, self.cfg.robot_radius * 3.2)
+        self._force_local_disk_free(self.x_est, self.y_est, radius=body_clear_radius)
         apply_scan(self.local_map, (self.x_est, self.y_est), self.heading_est, beams, step=self.cfg.lidar_step)
+        self._force_local_disk_free(self.x_est, self.y_est, radius=body_clear_radius)
+
+    def _force_local_disk_free(self, x: float, y: float, radius: float) -> None:
+        gx, gy = self.local_map.world_to_grid(x, y)
+        cells = int(math.ceil(radius / self.local_map.res))
+        r2 = radius * radius
+        for yy in range(max(0, gy - cells), min(self.local_map.ny, gy + cells + 1)):
+            for xx in range(max(0, gx - cells), min(self.local_map.nx, gx + cells + 1)):
+                wx, wy = self.local_map.grid_to_world(xx, yy)
+                if (wx - x) ** 2 + (wy - y) ** 2 <= r2:
+                    self.local_map.data[yy, xx] = 0
 
 
     def _copy_landmark_memory(self) -> dict[str, dict]:
@@ -251,6 +433,11 @@ class Robot:
             target_xy=self.current_target,
             current_region_id=self.current_region_id,
             current_region_center_xy=self.current_region_center_xy,
+            help_request_active=bool(self.help_request_active),
+            help_request_xy=self.help_request_xy,
+            help_request_time=float(self.help_request_time),
+            help_request_reason=str(self.help_request_reason),
+            help_assigned_helper_id=self.help_assigned_helper_id,
             home_connected=bool(self.home_connected),
             home_hops=self.home_hops,
             direct_neighbors=list(self.direct_neighbors),
@@ -283,7 +470,7 @@ class Robot:
         self.shared_path_memory = self.memory_store.export_path_memory()
         self.shared_keypoint_memory = self.memory_store.export_keypoint_memory()
         self.shared_memory_state = self.memory_store.export_stale_memory()
-        self.logger.write_snapshot(self.knowledge_snapshot(now))
+        self.logger.write_snapshot(self.knowledge_snapshot(now), now=now, min_period_s=self.cfg.log_snapshot_period_s)
 
     def note_connectivity_state(self, now: float) -> None:
         if self.home_connected != self.prev_home_connected:
@@ -328,6 +515,13 @@ class Robot:
                 'current_mode': self.current_mode,
                 'current_region_id': self.current_region_id,
                 'current_region_center_xy': None if self.current_region_center_xy is None else [float(self.current_region_center_xy[0]), float(self.current_region_center_xy[1])],
+                'help_request_active': bool(self.help_request_active),
+                'help_request_xy': None if self.help_request_xy is None else [float(self.help_request_xy[0]), float(self.help_request_xy[1])],
+                'help_request_time': float(self.help_request_time),
+                'help_request_reason': str(self.help_request_reason),
+                'help_assigned_helper_id': self.help_assigned_helper_id,
+                'help_target_robot_id': self.help_target_robot_id,
+                'help_status': str(self.help_status),
                 'home_connected': bool(self.home_connected),
                 'home_hops': self.home_hops,
                 'direct_neighbors': list(self.direct_neighbors),
@@ -399,7 +593,8 @@ class Robot:
         max_turn = self.cfg.robot_turn_gain * dt
         cmd_turn = max(-max_turn, min(max_turn, cmd_turn))
         speed_scale = max(0.15, 1.0 - min(1.0, abs(cmd_turn) / 1.2))
-        cmd_step = min(self.cfg.robot_max_speed * speed_scale * dt, d)
+        safety_scale = self.localization_speed_scale(now)
+        cmd_step = min(self.cfg.robot_max_speed * speed_scale * safety_scale * dt, d)
 
         old_heading_true_rad = math.radians(self.heading)
         new_heading_true_rad = old_heading_true_rad + cmd_turn
@@ -414,7 +609,21 @@ class Robot:
             self.y = ny
 
         actual_moved_dist = math.hypot(self.x - prev_x, self.y - prev_y)
-        self._predict_belief(cmd_step, cmd_turn, now)
+        if collided and bool(self.cfg.localization_use_actual_motion_feedback):
+            # A collision means the commanded translation did not happen.  The
+            # old code still propagated the EKF with cmd_step, so the robot could
+            # believe it was moving through an obstacle.  Keep only a tiny slip
+            # fraction and inflate uncertainty instead.
+            belief_step = min(cmd_step, max(0.0, actual_moved_dist + float(self.cfg.localization_collision_predict_fraction) * cmd_step))
+        else:
+            belief_step = cmd_step
+        self._predict_belief(belief_step, cmd_turn, now)
+        if collided:
+            inflate = float(self.cfg.localization_stuck_cov_inflation)
+            self.P[0, 0] += inflate
+            self.P[1, 1] += inflate
+            self.P[2, 2] += math.radians(2.5) ** 2
+            self.P = 0.5 * (self.P + self.P.T)
 
         moved = actual_moved_dist >= self.cfg.progress_epsilon
         if moved:
@@ -428,12 +637,36 @@ class Robot:
             if self.blocked_steps >= self.cfg.blocked_waypoint_skip_steps and len(self.current_path) > 1:
                 self.current_path.pop(0)
                 self.motion_state = 'skip-waypoint'
+            route_block_added = False
+            if self.blocked_steps >= int(getattr(self.cfg, 'stuck_route_block_steps', 3)):
+                # Collision point is the best hint for the failed approach.  If
+                # this was a stall without a geometry collision, block the next
+                # waypoint/heading direction instead so the new plan avoids
+                # reusing the same local corridor.
+                if collided:
+                    block_x, block_y = nx, ny
+                elif self.current_path:
+                    block_x, block_y = self.current_path[0]
+                else:
+                    block_x = self.x + math.cos(new_heading_true_rad) * max(self.cfg.robot_radius * 2.0, cmd_step)
+                    block_y = self.y + math.sin(new_heading_true_rad) * max(self.cfg.robot_radius * 2.0, cmd_step)
+                route_block_added = self.record_route_block(block_x, block_y, now)
+
+            if self.blocked_steps >= max(int(self.cfg.localization_stuck_replan_steps), int(self.cfg.blocked_waypoint_skip_steps)):
+                self.request_replan = True
+                self.localization_safety_state = 'critical'
+                recovery = f'; {self.last_recovery_debug}' if route_block_added or self.last_recovery_debug else ''
+                self.safety_debug = f'blocked recovery requested ({self.blocked_steps} blocked steps){recovery}'
+            if self.blocked_steps >= int(getattr(self.cfg, 'help_request_blocked_steps', 7)):
+                reason = f'stuck {self.blocked_steps} steps'
+                if self.start_help_request(now, reason):
+                    self.logger.log(now if now is not None else 0.0, 'help-request', reason=reason, pose_xy=self.est_pose_xy())
             if self.blocked_steps >= self.cfg.blocked_replan_steps:
                 self.current_path = []
                 self.current_target = None
                 self.blocked_steps = 0
                 self.request_replan = True
-                self.motion_state = 'replan'
+                self.motion_state = 'route-replan'
 
         self.path_history.append((self.x, self.y))
         if len(self.path_history) > self.cfg.path_history_max_points:

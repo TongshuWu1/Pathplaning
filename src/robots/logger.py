@@ -20,14 +20,30 @@ class RobotLogger:
             self.txt_path = self.run_dir / f'robot_{robot_id}_knowledge.txt'
             self.snapshot_path.write_text('{}\n', encoding='utf-8')
             self.txt_path.write_text('', encoding='utf-8')
+        self._last_snapshot_time = float('-inf')
 
 
     def log(self, *args: Any, **kwargs: Any) -> None:
         return
 
-    def write_snapshot(self, snapshot: Dict[str, Any]) -> None:
+    def write_snapshot(
+        self,
+        snapshot: Dict[str, Any],
+        *,
+        now: float | None = None,
+        min_period_s: float = 0.0,
+        force: bool = False,
+    ) -> None:
         if not self.enabled or self.snapshot_path is None or self.txt_path is None:
             return
+        if now is None:
+            try:
+                now = float(snapshot.get('time_s', 0.0))
+            except Exception:
+                now = 0.0
+        if not force and float(now) - self._last_snapshot_time < float(min_period_s):
+            return
+        self._last_snapshot_time = float(now)
         serializable = self._to_serializable(snapshot)
         self.snapshot_path.write_text(json.dumps(serializable, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
         self.txt_path.write_text(self._to_text(serializable), encoding='utf-8')

@@ -8,7 +8,10 @@ A cleaner baseline for decentralized multi-robot exploration.
 - explicit **home base** in the bottom-left corner that also acts as a trusted localization marker
 - continuous robot collision against true obstacle geometry
 - per-robot local occupancy maps built only from that robot's LiDAR
-- no shared mapping
+- separate **Team Fused Belief** map built from shareable robot maps, not global truth
+- per-cell fused confidence / uncertainty using pose covariance, sensor range, evidence type, and relay hops
+- winner-take-best fusion: each cell uses the robot source with the highest confidence
+- communication-respecting fusion: disconnected robots do not instantly update the shared team map
 - lightweight teammate packets relayed through the current communication graph
 - teammate packets now share estimated pose + covariance, full remembered estimated path from home, and navigation keypoints (no true-path leakage)
 - landmark-based EKF-style localization updates from fixed landmarks and the home marker
@@ -34,6 +37,8 @@ A cleaner baseline for decentralized multi-robot exploration.
   - one-shot reachable-set computation for frontier scoring instead of repeated trial planning
 - GUI with:
   - global truth panel
+  - separate Team Fused Belief panel
+  - estimated robot positions and known landmarks on the fused belief panel
   - one local-map panel per robot
   - own path/target overlays
   - received teammate paths / positions / targets
@@ -48,6 +53,7 @@ A cleaner baseline for decentralized multi-robot exploration.
   - Obstacle count
   - Landmark count
   - ray toggle
+  - **Fused quality** toggle for green/yellow/red confidence overlay on the Team Fused Belief map
 
 ## What this version intentionally leaves simple
 
@@ -55,7 +61,7 @@ A cleaner baseline for decentralized multi-robot exploration.
 - no role-switch logic yet
 - no return-home mission logic yet
 
-This is still a baseline, but it is now a more reliable baseline for the next research layers.
+This is still a baseline, but it now has the first visualization-first team belief / uncertainty-aware mapping layer. Planning still uses each robot local map; the fused map is ready for later planning/evaluation integration.
 
 ## Run
 

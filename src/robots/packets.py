@@ -28,6 +28,11 @@ class KnowledgeSnapshot:
     target_xy: Optional[Tuple[float, float]]
     current_region_id: Optional[int] = None
     current_region_center_xy: Optional[Tuple[float, float]] = None
+    help_request_active: bool = False
+    help_request_xy: Optional[Tuple[float, float]] = None
+    help_request_time: float = 0.0
+    help_request_reason: str = ''
+    help_assigned_helper_id: Optional[int] = None
     home_connected: bool = False
     home_hops: Optional[int] = None
     direct_neighbors: List[int] = field(default_factory=list)
