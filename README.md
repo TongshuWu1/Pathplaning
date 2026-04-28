@@ -35,7 +35,7 @@ Headless run:
 
 ```bash
 python main.py --headless --steps 300
-python scripts/smoke_test.py
+python -m scripts.smoke_test
 ```
 
 ## UI controls

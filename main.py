@@ -4,7 +4,6 @@ import argparse
 
 from src.config import AppConfig
 from src.simulator import Simulator
-from src.ui.matplotlib_dashboard import MatplotlibDashboard
 
 
 def main() -> None:
@@ -28,6 +27,7 @@ def main() -> None:
         for i, route in enumerate(sim.home_memory.best_routes[:4]):
             print(f"route[{i}] length={route.length:.2f} clearance={route.min_clearance:.2f} cert={route.certificate:.2f} reported={route.reported_home} status={route.status}")
     else:
+        from src.ui.matplotlib_dashboard import MatplotlibDashboard
         MatplotlibDashboard(sim).run()
 
 

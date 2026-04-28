@@ -13,7 +13,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from .config import MappingConfig
-from .geometry import Point, Pose, clamp
+from .geometry import Point, Pose, clamp, distance
 from .sensors import LidarScan
 
 
@@ -36,6 +36,9 @@ class OccupancyGrid:
         self.quality = np.zeros((self.ny, self.nx), dtype=float)
         self.last_seen = np.full((self.ny, self.nx), -np.inf, dtype=float)
         self.source = np.full((self.ny, self.nx), -1, dtype=int)
+        self._version = 0
+        self._clearance_cache = None
+        self._clearance_cache_key = None
 
     def copy(self) -> "OccupancyGrid":
         other = OccupancyGrid(self.width_m, self.height_m, self.cfg)
@@ -43,7 +46,50 @@ class OccupancyGrid:
         other.quality = self.quality.copy()
         other.last_seen = self.last_seen.copy()
         other.source = self.source.copy()
+        other._version = self._version
         return other
+
+
+    def _invalidate_cache(self) -> None:
+        self._version += 1
+        self._clearance_cache = None
+        self._clearance_cache_key = None
+
+    def clearance_map(self, max_radius_m: float = 3.0) -> np.ndarray:
+        """Approximate distance to nearest occupied cell in meters.
+
+        Two-pass chamfer transform: fast, dependency-free, and good enough for
+        centerline/clearance-aware planning on the coarser grid.
+        """
+        max_cells = int(math.ceil(max_radius_m / self.res))
+        key = (self._version, max_cells)
+        if self._clearance_cache is not None and self._clearance_cache_key == key:
+            return self._clearance_cache
+        occ = self.occupied_mask()
+        inf = float(max_cells + 4)
+        dist = np.full((self.ny, self.nx), inf, dtype=float)
+        dist[occ] = 0.0
+        diag = math.sqrt(2.0)
+        for y in range(self.ny):
+            for x in range(self.nx):
+                v = dist[y, x]
+                if x > 0: v = min(v, dist[y, x - 1] + 1.0)
+                if y > 0: v = min(v, dist[y - 1, x] + 1.0)
+                if x > 0 and y > 0: v = min(v, dist[y - 1, x - 1] + diag)
+                if x + 1 < self.nx and y > 0: v = min(v, dist[y - 1, x + 1] + diag)
+                dist[y, x] = v
+        for y in range(self.ny - 1, -1, -1):
+            for x in range(self.nx - 1, -1, -1):
+                v = dist[y, x]
+                if x + 1 < self.nx: v = min(v, dist[y, x + 1] + 1.0)
+                if y + 1 < self.ny: v = min(v, dist[y + 1, x] + 1.0)
+                if x + 1 < self.nx and y + 1 < self.ny: v = min(v, dist[y + 1, x + 1] + diag)
+                if x > 0 and y + 1 < self.ny: v = min(v, dist[y + 1, x - 1] + diag)
+                dist[y, x] = v
+        clearance = np.clip(dist * self.res, 0.0, max_radius_m)
+        self._clearance_cache = clearance
+        self._clearance_cache_key = key
+        return clearance
 
     def world_to_cell(self, p: Point) -> tuple[int, int] | None:
         i = int(math.floor(p[0] / self.res))
@@ -138,6 +184,7 @@ class OccupancyGrid:
         if start is None:
             return
         th = est_pose[2]
+        wrote = False
         for angle, r, hit in zip(scan.angles, scan.ranges, scan.hit):
             end = (est_pose[0] + math.cos(th + float(angle)) * float(r), est_pose[1] + math.sin(th + float(angle)) * float(r))
             end_cell = self.world_to_cell(end)
@@ -154,8 +201,12 @@ class OccupancyGrid:
             free_cells = ray_cells[:-1] if hit else ray_cells
             for c in free_cells:
                 self._write_cell(c, self.cfg.logodds_free, pose_quality, robot_id, time_s)
+                wrote = True
             if hit:
                 self._write_cell(ray_cells[-1], self.cfg.logodds_occ, pose_quality, robot_id, time_s)
+                wrote = True
+        if wrote:
+            self._invalidate_cache()
 
     def predict_scan_ranges(self, est_pose: Pose, angles: np.ndarray, max_range: float) -> np.ndarray:
         out = np.full(len(angles), max_range, dtype=float)
@@ -221,26 +272,55 @@ class OccupancyGrid:
         clusters.sort(key=lambda c: c.information_gain, reverse=True)
         return clusters
 
-    def clearance_at(self, p: Point, max_radius_m: float = 2.0) -> float:
+    def clearance_at(self, p: Point, max_radius_m: float = 3.0) -> float:
         cell = self.world_to_cell(p)
         if cell is None:
             return 0.0
-        occ = self.occupied_mask()
-        ci, cj = cell
-        max_r = max(1, int(max_radius_m / self.res))
-        best = max_radius_m
-        y0 = max(0, cj - max_r)
-        y1 = min(self.ny, cj + max_r + 1)
-        x0 = max(0, ci - max_r)
-        x1 = min(self.nx, ci + max_r + 1)
-        ys, xs = np.nonzero(occ[y0:y1, x0:x1])
-        if len(xs) == 0:
-            return best
-        for yy, xx in zip(ys, xs):
-            wc = self.cell_to_world((x0 + int(xx), y0 + int(yy)))
-            d = math.hypot(wc[0] - p[0], wc[1] - p[1])
-            best = min(best, d)
-        return float(best)
+        i, j = cell
+        return float(self.clearance_map(max_radius_m)[j, i])
+
+    def safe_approach_point(self, frontier: FrontierCluster, start: Point, search_radius_m: float, min_clearance_m: float, desired_clearance_m: float) -> Point:
+        clearance = self.clearance_map(max_radius_m=max(3.0, desired_clearance_m * 2.5))
+        free = self.free_mask()
+        known = self.known_mask()
+        centroid = frontier.centroid_world
+        ccell = self.world_to_cell(centroid)
+        if ccell is None:
+            return centroid
+        radius = max(1, int(math.ceil(search_radius_m / self.res)))
+        ci, cj = ccell
+        best_cell = None
+        best_score = -math.inf
+        for j in range(max(0, cj - radius), min(self.ny, cj + radius + 1)):
+            for i in range(max(0, ci - radius), min(self.nx, ci + radius + 1)):
+                if not free[j, i] or not known[j, i]:
+                    continue
+                cl = float(clearance[j, i])
+                if cl < min_clearance_m:
+                    continue
+                p = self.cell_to_world((i, j))
+                dc = distance(p, centroid)
+                ds = distance(p, start)
+                score = 2.2 * min(1.0, cl / max(1e-6, desired_clearance_m)) - 0.40 * dc - 0.03 * ds
+                if score > best_score:
+                    best_score = score
+                    best_cell = (i, j)
+        return self.cell_to_world(best_cell) if best_cell is not None else centroid
+
+    def segment_min_clearance(self, a: Point, b: Point, max_radius_m: float = 3.0) -> float:
+        ca = self.world_to_cell(a)
+        cb = self.world_to_cell(b)
+        if ca is None or cb is None:
+            return 0.0
+        clearance = self.clearance_map(max_radius_m)
+        cells = self._bresenham(ca, cb)
+        vals = [float(clearance[j, i]) for i, j in cells if 0 <= i < self.nx and 0 <= j < self.ny]
+        return min(vals) if vals else 0.0
+
+    def path_min_clearance(self, path: list[Point], max_radius_m: float = 3.0) -> float:
+        if len(path) < 2:
+            return 0.0
+        return min(self.segment_min_clearance(a, b, max_radius_m) for a, b in zip(path[:-1], path[1:]))
 
     def merge_from_digest(self, digest: dict) -> None:
         # Lightweight packet fusion: accept higher-quality cells from teammates.
@@ -249,6 +329,7 @@ class OccupancyGrid:
         quals = digest.get("quality", [])
         src = int(digest.get("source_robot", -1))
         t = float(digest.get("time_s", 0.0))
+        changed = False
         for (i, j), lo, q in zip(idx, vals, quals):
             if not (0 <= i < self.nx and 0 <= j < self.ny):
                 continue
@@ -257,6 +338,9 @@ class OccupancyGrid:
                 self.quality[j, i] = float(q)
                 self.source[j, i] = src
                 self.last_seen[j, i] = t
+                changed = True
+        if changed:
+            self._invalidate_cache()
 
     def make_digest(self, robot_id: int, time_s: float, max_cells: int = 650) -> dict:
         known = self.known_mask() & (self.quality > 0.05)
