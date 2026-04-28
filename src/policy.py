@@ -108,6 +108,7 @@ class LocalFrontierPolicy:
         team_prediction_max_path_points: int = 36,
         team_prediction_min_novelty_ratio: float = 0.18,
         team_prediction_claim_target_gain: float = 1.15,
+        max_goal_repair_dist: float = 1.10,
     ):
         self.grid = grid
         self.sensing_radius = sensing_radius
@@ -147,6 +148,7 @@ class LocalFrontierPolicy:
         self.team_prediction_max_path_points = max(1, int(team_prediction_max_path_points))
         self.team_prediction_min_novelty_ratio = max(0.0, min(1.0, float(team_prediction_min_novelty_ratio)))
         self.team_prediction_claim_target_gain = float(team_prediction_claim_target_gain)
+        self.max_goal_repair_dist = max(0.0, float(max_goal_repair_dist))
 
     def choose_route(
         self,
@@ -479,6 +481,14 @@ class LocalFrontierPolicy:
             return None
         stats = planner.last_plan_stats
         tx, ty = path[-1]
+        goal_repair_dist = math.hypot(tx - target_xy[0], ty - target_xy[1])
+        if mode == "explore" and goal_repair_dist > self.max_goal_repair_dist:
+            # A* can legally snap a blocked/unknown target to the nearest free
+            # cell.  That is useful for tiny numerical errors, but a large snap
+            # means the selected Voronoi/frontier target is no longer the same
+            # assignment.  Reject it so the robot can auction/replan a fresh
+            # region instead of committing to a stale obstacle-side target.
+            return None
         region_label = self._classify_region((tx, ty), blocked, clearance)
         travel_cost = float(stats.path_length_m)
         min_clear = float(stats.min_clearance_m)

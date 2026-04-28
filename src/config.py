@@ -71,8 +71,22 @@ class SimConfig:
     frontier_region_stay_bonus: float = 28.0
     frontier_region_hold_time: float = 12.0
     # Do not re-auction while the robot is still travelling to a valid target.
+    # The active-goal validator below is allowed to break this commitment when
+    # new LiDAR observations make the old target/path invalid.
     target_commit_min_s: float = 16.0
     target_replan_near_target_radius: float = 1.8
+    # When A* repairs a blocked frontier target, accept the repair only if the
+    # endpoint stays close to the intended target/region.  Large snaps usually
+    # mean the Voronoi/frontier assignment was inside an obstacle or behind a
+    # newly discovered wall.
+    goal_repair_max_dist_m: float = 1.10
+    # Active route validation: after each LiDAR/map update, re-check the current
+    # committed target and upcoming path against the newly known map.
+    active_goal_revalidation_enabled: bool = True
+    active_goal_min_unknown_cells: int = 4
+    active_goal_check_radius_factor: float = 0.75
+    active_goal_path_check_points: int = 8
+    active_goal_replan_cooldown_s: float = 0.35
 
     decision_min_route_clearance: float = 0.24
     decision_max_predicted_cov_trace: float = 2.8

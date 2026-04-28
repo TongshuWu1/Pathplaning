@@ -99,6 +99,7 @@ class Simulator:
             team_prediction_max_path_points=self.cfg.team_prediction_max_path_points,
             team_prediction_min_novelty_ratio=self.cfg.team_prediction_min_novelty_ratio,
             team_prediction_claim_target_gain=self.cfg.team_prediction_claim_target_gain,
+            max_goal_repair_dist=self.cfg.goal_repair_max_dist_m,
         )
         self.robots = []
         run_dir = self._make_run_dir()
@@ -208,6 +209,13 @@ class Simulator:
             beams = robot.sense(self.world.obstacles)
             robot.update_localization(all_landmarks, robots_by_id, self.world.obstacles, self.time_s)
             robot.update_map(beams)
+
+        # A selected frontier can become invalid after the newest LiDAR scan
+        # turns previously-unknown cells into occupied/free cells.  Break target
+        # commitment immediately when the active endpoint or route no longer
+        # agrees with the current local map.
+        for robot in self.robots:
+            self._validate_active_exploration_route(robot)
 
         # Team fused belief is for visualization; update it on a short period
         # instead of every simulator step.
@@ -367,6 +375,135 @@ class Simulator:
     def _make_exploration_planning_map(self, robot: Robot) -> np.ndarray:
         data = np.array(robot.local_map.data, copy=True)
         return self._apply_temporary_route_blocks(robot, data, protect_home=True)
+
+
+    def _validate_active_exploration_route(self, robot: Robot) -> None:
+        """Invalidate stale exploration targets after the newest local map update.
+
+        Frontier targets are selected next to unknown cells.  After a LiDAR scan,
+        the same cells may become occupied, may become too close to an obstacle,
+        or may simply no longer contain useful unknown information.  In those
+        cases we should break the target hold and let the policy choose again
+        instead of blindly following the old Voronoi/frontier assignment.
+        """
+        if not bool(getattr(self.cfg, 'active_goal_revalidation_enabled', True)):
+            return
+        if self.mission_phase != 'explore':
+            return
+        if robot.current_mode not in {'explore', 'relay'}:
+            return
+        if robot.current_target is None or not robot.current_path:
+            return
+        if self.time_s - float(robot.last_plan_time) < float(getattr(self.cfg, 'active_goal_replan_cooldown_s', 0.35)):
+            return
+
+        planning_map = self._make_exploration_planning_map(robot)
+        blocked = self.planner.inflated_mask(planning_map)
+        target_xy = robot.current_target
+        gx, gy = self.grid.world_to_grid(*target_xy)
+
+        reason = ''
+        block_xy: Optional[Tuple[float, float]] = None
+        hard_invalid = False
+
+        if bool(blocked[gy, gx]):
+            reason = 'target became blocked after sensing'
+            block_xy = target_xy
+            hard_invalid = True
+        elif robot.current_mode == 'explore':
+            unknown_cells = self._unknown_cells_near_target(robot.local_map.data, target_xy)
+            if unknown_cells < int(getattr(self.cfg, 'active_goal_min_unknown_cells', 4)):
+                reason = f'target is no longer a frontier ({unknown_cells} unknown cells nearby)'
+                hard_invalid = True
+
+        if not reason:
+            block_xy = self._first_blocked_active_path_point(robot, planning_map, blocked)
+            if block_xy is not None:
+                reason = 'path became blocked after sensing'
+
+        if not reason:
+            return
+
+        if block_xy is not None:
+            robot.record_route_block(block_xy[0], block_xy[1], self.time_s)
+
+        old_target = robot.current_target
+        robot.current_path = []
+        robot.request_replan = True
+        robot.motion_state = 'route-replan'
+        robot.region_hold_until = min(robot.region_hold_until, self.time_s)
+
+        if hard_invalid:
+            # If the endpoint itself is now bad or no longer informative, release
+            # the region claim too.  Otherwise a path-only failure may replan to
+            # the same still-useful frontier using a different route.
+            robot.current_target = None
+            robot.current_region_id = None
+            robot.current_region_center_xy = None
+
+        msg = f'active target invalid: {reason}'
+        if old_target is not None:
+            msg += f'\nold=({old_target[0]:.1f},{old_target[1]:.1f})'
+        robot.last_choice_debug = msg
+        robot.logger.log(
+            self.time_s,
+            'active-route-invalid',
+            reason=reason,
+            old_target_xy=old_target,
+            block_xy=block_xy,
+            mode=robot.current_mode,
+        )
+
+    def _unknown_cells_near_target(self, local_map: np.ndarray, target_xy: Tuple[float, float]) -> int:
+        radius = max(
+            self.grid.res,
+            float(getattr(self.cfg, 'active_goal_check_radius_factor', 0.75)) * float(self.cfg.lidar_range),
+        )
+        gx, gy = self.grid.world_to_grid(*target_xy)
+        cells = int(math.ceil(radius / self.grid.res))
+        y0 = max(0, gy - cells)
+        y1 = min(self.grid.ny, gy + cells + 1)
+        x0 = max(0, gx - cells)
+        x1 = min(self.grid.nx, gx + cells + 1)
+        if y0 >= y1 or x0 >= x1:
+            return 0
+        yy, xx = np.mgrid[y0:y1, x0:x1]
+        wx = (xx + 0.5) * self.grid.res
+        wy = (yy + 0.5) * self.grid.res
+        disk = (wx - target_xy[0]) ** 2 + (wy - target_xy[1]) ** 2 <= radius ** 2
+        return int(np.count_nonzero((local_map[y0:y1, x0:x1] == UNKNOWN) & disk))
+
+    def _first_blocked_active_path_point(
+        self,
+        robot: Robot,
+        planning_map: np.ndarray,
+        blocked: np.ndarray,
+    ) -> Optional[Tuple[float, float]]:
+        max_points = max(1, int(getattr(self.cfg, 'active_goal_path_check_points', 8)))
+        waypoints = list(robot.current_path[:max_points])
+        if robot.current_target is not None and robot.current_target not in waypoints:
+            waypoints.append(robot.current_target)
+        if not waypoints:
+            return None
+
+        prev = robot.est_pose_xy()
+        # Protect the robot's current cell: it can temporarily sit in a cell that
+        # is marked unknown/blocked because of localization drift or a short-lived
+        # route block.  The validation should check the route ahead, not reject
+        # just because the start cell is imperfect.
+        psx, psy = self.grid.world_to_grid(*prev)
+        if 0 <= psx < self.grid.nx and 0 <= psy < self.grid.ny:
+            blocked = blocked.copy()
+            blocked[psy, psx] = False
+
+        for wp in waypoints:
+            gx, gy = self.grid.world_to_grid(*wp)
+            if bool(blocked[gy, gx]):
+                return wp
+            if not self.planner._segment_free(prev, wp, planning_map, blocked):
+                return wp
+            prev = wp
+        return None
 
 
     def _robot_by_id(self, robot_id: int) -> Optional[Robot]:
