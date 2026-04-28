@@ -1,93 +1,92 @@
+"""Small geometry helpers used by the baseline simulator."""
 from __future__ import annotations
 
-from dataclasses import dataclass
 import math
-from typing import Iterable, Optional, Tuple
+from dataclasses import dataclass
+from typing import Iterable
+
+import numpy as np
+
+
+Pose = tuple[float, float, float]
+Point = tuple[float, float]
+
+
+def wrap_angle(theta: float) -> float:
+    return (theta + math.pi) % (2.0 * math.pi) - math.pi
+
+
+def clamp(x: float, lo: float, hi: float) -> float:
+    return max(lo, min(hi, x))
+
+
+def distance(a: Point, b: Point) -> float:
+    return float(math.hypot(a[0] - b[0], a[1] - b[1]))
+
+
+def unit_from_angle(theta: float) -> tuple[float, float]:
+    return math.cos(theta), math.sin(theta)
+
+
+def angle_to(a: Point, b: Point) -> float:
+    return math.atan2(b[1] - a[1], b[0] - a[0])
+
+
+def segment_length(points: Iterable[Point]) -> float:
+    pts = list(points)
+    if len(pts) < 2:
+        return 0.0
+    return sum(distance(a, b) for a, b in zip(pts[:-1], pts[1:]))
 
 
 @dataclass(frozen=True)
-class RectObstacle:
-    cx: float
-    cy: float
-    w: float
-    h: float
+class Rect:
+    x0: float
+    y0: float
+    x1: float
+    y1: float
+
+    def normalized(self) -> "Rect":
+        return Rect(min(self.x0, self.x1), min(self.y0, self.y1), max(self.x0, self.x1), max(self.y0, self.y1))
 
     @property
-    def xmin(self) -> float:
-        return self.cx - self.w / 2.0
+    def center(self) -> Point:
+        r = self.normalized()
+        return ((r.x0 + r.x1) * 0.5, (r.y0 + r.y1) * 0.5)
 
-    @property
-    def xmax(self) -> float:
-        return self.cx + self.w / 2.0
+    def contains(self, p: Point, margin: float = 0.0) -> bool:
+        # Rectangles are normalized at construction in the world generator.
+        return (self.x0 - margin <= p[0] <= self.x1 + margin) and (self.y0 - margin <= p[1] <= self.y1 + margin)
 
-    @property
-    def ymin(self) -> float:
-        return self.cy - self.h / 2.0
-
-    @property
-    def ymax(self) -> float:
-        return self.cy + self.h / 2.0
+    def corners(self) -> list[Point]:
+        r = self.normalized()
+        return [(r.x0, r.y0), (r.x1, r.y0), (r.x1, r.y1), (r.x0, r.y1)]
 
 
-def clamp(v: float, lo: float, hi: float) -> float:
-    return max(lo, min(hi, v))
+def ccw(a: Point, b: Point, c: Point) -> bool:
+    return (c[1] - a[1]) * (b[0] - a[0]) > (b[1] - a[1]) * (c[0] - a[0])
 
 
-def dist(a: Tuple[float, float], b: Tuple[float, float]) -> float:
-    return math.hypot(a[0] - b[0], a[1] - b[1])
+def segments_intersect(a: Point, b: Point, c: Point, d: Point) -> bool:
+    return ccw(a, c, d) != ccw(b, c, d) and ccw(a, b, c) != ccw(a, b, d)
 
 
-def circle_intersects_rect(x: float, y: float, radius: float, rect: RectObstacle) -> bool:
-    qx = clamp(x, rect.xmin, rect.xmax)
-    qy = clamp(y, rect.ymin, rect.ymax)
-    return (x - qx) ** 2 + (y - qy) ** 2 <= radius ** 2
+def segment_intersects_rect(a: Point, b: Point, rect: Rect, margin: float = 0.0) -> bool:
+    r = Rect(rect.x0 - margin, rect.y0 - margin, rect.x1 + margin, rect.y1 + margin).normalized()
+    if r.contains(a) or r.contains(b):
+        return True
+    corners = r.corners()
+    edges = list(zip(corners, corners[1:] + corners[:1]))
+    return any(segments_intersect(a, b, c, d) for c, d in edges)
 
 
-def point_in_rect(x: float, y: float, rect: RectObstacle) -> bool:
-    return rect.xmin <= x <= rect.xmax and rect.ymin <= y <= rect.ymax
-
-
-def ray_rect_distance(x0: float, y0: float, dx: float, dy: float, rect: RectObstacle, max_dist: float) -> Optional[float]:
-    eps = 1e-9
-    tmin = -float('inf')
-    tmax = float('inf')
-
-    if abs(dx) < eps:
-        if x0 < rect.xmin or x0 > rect.xmax:
-            return None
-    else:
-        tx1 = (rect.xmin - x0) / dx
-        tx2 = (rect.xmax - x0) / dx
-        tmin = max(tmin, min(tx1, tx2))
-        tmax = min(tmax, max(tx1, tx2))
-
-    if abs(dy) < eps:
-        if y0 < rect.ymin or y0 > rect.ymax:
-            return None
-    else:
-        ty1 = (rect.ymin - y0) / dy
-        ty2 = (rect.ymax - y0) / dy
-        tmin = max(tmin, min(ty1, ty2))
-        tmax = min(tmax, max(ty1, ty2))
-
-    if tmax < max(tmin, 0.0):
-        return None
-    hit_t = tmin if tmin >= 0.0 else tmax
-    if hit_t < 0.0 or hit_t > max_dist:
-        return None
-    return hit_t
-
-
-def segment_hits_rect(p0: Tuple[float, float], p1: Tuple[float, float], rect: RectObstacle) -> bool:
-    x0, y0 = p0
-    x1, y1 = p1
-    dx = x1 - x0
-    dy = y1 - y0
-    d = math.hypot(dx, dy)
-    if d < 1e-9:
-        return point_in_rect(x0, y0, rect)
-    return ray_rect_distance(x0, y0, dx / d, dy / d, rect, d) is not None
-
-
-def line_of_sight(p0: Tuple[float, float], p1: Tuple[float, float], obstacles: Iterable[RectObstacle]) -> bool:
-    return not any(segment_hits_rect(p0, p1, obs) for obs in obstacles)
+def covariance_ellipse(cov_xy: np.ndarray, scale: float = 2.0, samples: int = 40) -> tuple[np.ndarray, np.ndarray]:
+    cov = np.asarray(cov_xy, dtype=float)
+    if cov.shape != (2, 2) or not np.all(np.isfinite(cov)):
+        return np.array([]), np.array([])
+    vals, vecs = np.linalg.eigh(cov)
+    vals = np.maximum(vals, 1e-9)
+    theta = np.linspace(0.0, 2.0 * math.pi, samples)
+    circle = np.vstack([np.cos(theta), np.sin(theta)])
+    ellipse = vecs @ np.diag(np.sqrt(vals) * scale) @ circle
+    return ellipse[0], ellipse[1]
