@@ -42,13 +42,16 @@ class RobotAgent:
         self.estimator=PoseEstimator(initial_pose,cfg.motion,rng); self.lidar=LidarSensor(cfg.lidar,rng)
         self.map=OccupancyGrid(world.width,world.height,cfg.mapping); self.graph=RouteGraph(cfg.cage.edge_merge_distance)
         self.home_node=self.graph.add_node(world.home,kind="home",confidence=1.0,allow_merge=False)
+        self.home_xy=world.home
+        self.search_prior_xy=(world.width*0.88, world.height*0.88)
         self.last_graph_node=self.home_node; self.last_keypoint_xy=world.home
         self.scan: LidarScan | None=None; self.assessment=LidarAssessment(); self.planner=GridPlanner(cfg.planning)
         self.path=[]; self.path_index=0; self.last_replan_time=-999.0; self.current_goal=None; self.current_task="SEARCH"
+        self.goal_commit_start=-999.0; self.goal_commit_score=-math.inf; self.best_goal_distance=math.inf; self.last_goal_progress_time=0.0
         self.status=RobotStatus(task="SEARCH"); self.target=TargetReport()
         self.known_teammate_goals={}; self.known_teammate_paths={}; self.known_teammate_tasks={}
         self.known_teammate_pose={}; self.known_teammate_cov={}; self.known_teammate_last_seen={}
-        self.visit_history=[self.est_xy]
+        self.visit_history=[self.est_xy]; self.failed_goal_memory=[]
         self.last_command=(0.0,0.0); self.last_pose_quality=1.0; self.best_routes=[]; self.received_packets=0; self.blocked_events=0
 
     @property
@@ -117,6 +120,8 @@ class RobotAgent:
             if not self.target.detected or conf>self.target.confidence:
                 xy=tuple(tr["xy"]); self.target=TargetReport(True,(float(xy[0]),float(xy[1])),conf,int(tr.get("source_robot",packet.sender_id)),float(tr.get("time_s",packet.time_s)),bool(tr.get("reported_home",False)))
                 tid=self.graph.add_node(self.target.xy,kind="target",confidence=conf,allow_merge=True); self.graph.target_id=tid
+            elif bool(tr.get("reported_home",False)):
+                self.target.reported_home=True
         self._expire_stale_teammate_intent(packet.time_s)
 
     def make_packet(self,time_s:float)->RobotPacket:
@@ -136,9 +141,17 @@ class RobotAgent:
 
     def choose_task_and_plan(self,time_s:float)->None:
         self._expire_stale_teammate_intent(time_s); team_goals=self.fresh_teammate_goals(time_s); team_paths=self.fresh_teammate_paths(time_s)
-        if self.assessment.blocked_forward and self.path: self.path=[]; self.path_index=0; self.status.note="path_invalidated_by_lidar_block"
-        if time_s-self.last_replan_time<self.cfg.robot.path_replan_period_s and self.path_index<len(self.path): return
+        event_replan=False
+        if self.assessment.blocked_forward and self.path:
+            self._remember_failed_goal(); self.path=[]; self.path_index=0; self.status.note="path_invalidated_by_lidar_block"; event_replan=True
+        if self._goal_progress_stalled(time_s):
+            self._remember_failed_goal(); self.path=[]; self.path_index=0; self.status.note="goal_progress_stalled"; event_replan=True
+        if self._should_keep_committed_goal(time_s,event_replan): return
+        if not event_replan and time_s-self.last_replan_time<self.cfg.robot.path_replan_period_s and self.path_index<len(self.path): return
         goal,task,reason,breakdown=self._select_goal_from_lidar_map(team_goals,team_paths)
+        if self._should_reject_goal_switch(goal,breakdown,time_s,event_replan):
+            self.status.note="committed_current_goal"
+            return
         self.current_goal=goal; self.current_task=task; self.status.task=task; self.status.goal=goal
         self.status.planning_source="LOCAL LiDAR map + EKF pose estimate + packet intent only"; self.status.note=reason; self.status.reward_breakdown=breakdown
         if goal is None:
@@ -149,8 +162,40 @@ class RobotAgent:
             self.path=simplified if simp_clear>=self.cfg.planning.critical_clearance_m else result.path; self.path_index=0
             self.status.last_path_min_clearance=max(0.0,min(result.min_clearance,simp_clear if simplified else result.min_clearance))
         else:
-            self.path=[]; self.path_index=0; self.status.last_path_min_clearance=0.0
+            self._remember_failed_goal(goal); self.path=[]; self.path_index=0; self.status.last_path_min_clearance=0.0
         self.status.last_plan_success=result.success; self.status.last_plan_reason=result.reason; self.last_replan_time=time_s; self.best_routes=self.graph.top_routes(k=4)
+        if result.success:
+            self.goal_commit_start=time_s; self.goal_commit_score=float(breakdown.get("score",0.0)); self.best_goal_distance=distance(self.est_xy,goal); self.last_goal_progress_time=time_s
+
+    def _remember_failed_goal(self, goal: Point | None = None)->None:
+        g=goal if goal is not None else self.current_goal
+        if g is None: return
+        self.failed_goal_memory.append((float(g[0]),float(g[1])))
+        self.failed_goal_memory=self.failed_goal_memory[-self.cfg.robot.failed_goal_memory_size:]
+
+    def _goal_progress_stalled(self,time_s:float)->bool:
+        if self.current_goal is None or not self.path or self.path_index>=len(self.path): return False
+        d=distance(self.est_xy,self.current_goal)
+        if d+0.35<self.best_goal_distance:
+            self.best_goal_distance=d; self.last_goal_progress_time=time_s
+            return False
+        return time_s-self.last_goal_progress_time>self.cfg.robot.stuck_progress_timeout_s
+
+    def _should_keep_committed_goal(self,time_s:float,event_replan:bool)->bool:
+        if event_replan or self.current_goal is None or not self.path or self.path_index>=len(self.path): return False
+        if self.target.detected: return False
+        if distance(self.est_xy,self.current_goal)<=self.cfg.robot.goal_tolerance: return False
+        if time_s-self.goal_commit_start<self.cfg.robot.goal_commit_time_s:
+            self.status.note="commit_hold"
+            return True
+        return False
+
+    def _should_reject_goal_switch(self,goal:Point|None,breakdown:dict[str,float],time_s:float,event_replan:bool)->bool:
+        if event_replan or goal is None or self.current_goal is None or not self.path or self.path_index>=len(self.path): return False
+        if self.target.detected or distance(self.est_xy,self.current_goal)<=self.cfg.robot.goal_tolerance: return False
+        if distance(goal,self.current_goal)<0.85: return False
+        new_score=float(breakdown.get("score",0.0))
+        return new_score<self.goal_commit_score+self.cfg.robot.goal_switch_score_margin
 
     def fresh_teammate_goals(self,time_s:float)->dict[int,Point]: self._expire_stale_teammate_intent(time_s); return dict(self.known_teammate_goals)
     def fresh_teammate_paths(self,time_s:float)->dict[int,list[Point]]: self._expire_stale_teammate_intent(time_s); return {rid:list(path) for rid,path in self.known_teammate_paths.items() if path}
@@ -161,6 +206,8 @@ class RobotAgent:
 
     def _select_goal_from_lidar_map(self,team_goals:dict[int,Point],team_paths:dict[int,list[Point]])->tuple[Point|None,str,str,dict[str,float]]:
         if self.target.detected and self.target.xy is not None:
+            if not self.target.reported_home and self._should_report_target_to_home():
+                return self.home_xy,"REPORT_TARGET_HOME","target_known_return_to_home_report",{"report_target":1.0,"distance":distance(self.est_xy,self.home_xy)}
             dtarget=distance(self.est_xy,self.target.xy); bd={"target_progress":max(0.0,8.0-dtarget),"distance":dtarget}
             return (self.target.xy,"ADVANCE_TO_TARGET","target_known_plan_to_detected_target",bd) if dtarget>self.cfg.robot.goal_tolerance else (self.target.xy,"CERTIFY_TARGET_EDGE","near_detected_target_certifying_edge",bd)
         if self.assessment.consistency<self.cfg.cage.reanchor_consistency_threshold:
@@ -170,34 +217,78 @@ class RobotAgent:
         if not frontiers:
             gx=self.est_xy[0]+math.cos(self.est_pose[2]+self.assessment.best_open_angle)*min(1.8,self.cfg.lidar.range*0.38); gy=self.est_xy[1]+math.sin(self.est_pose[2]+self.assessment.best_open_angle)*min(1.8,self.cfg.lidar.range*0.38)
             return (gx,gy),"SEARCH_OPEN_SECTOR","no_frontier_use_best_lidar_open_sector",{"open_sector":1.0}
-        best=None
-        for fr in frontiers[:self.cfg.planning.frontier_sample_count]:
+        best=None; skipped_near=[]
+        for fr in frontiers[:max(1,self.cfg.planning.frontier_sample_count)]:
             approach=self.map.safe_approach_point(fr,self.est_xy,self.cfg.planning.safe_approach_search_radius_m,self.cfg.planning.safe_approach_min_clearance_m,self.cfg.planning.desired_clearance_m)
             d=max(0.1,distance(self.est_xy,approach)); clearance=self.map.clearance_at(approach)
+            if d < max(0.75,self.cfg.robot.goal_tolerance*1.5):
+                skipped_near.append((fr,approach,d,clearance))
+                continue
             info=self.cfg.planning.information_weight*math.log1p(fr.information_gain); ratio=min(1.0,clearance/max(1e-6,self.cfg.planning.desired_clearance_m))
             clear_r=self.cfg.planning.clearance_weight*min(2.5,clearance); center=self.cfg.planning.centerline_weight*(ratio**2)
-            recent=self._recent_visit_penalty(approach); tg=self._teammate_goal_penalty(approach,team_goals); tp=self._teammate_path_penalty(approach,team_paths); re=self._route_extension_reward(approach)
-            score=info+clear_r+center+self.cfg.planning.route_alternate_weight*re-self.cfg.planning.distance_weight*d-self.cfg.planning.recent_visit_penalty_weight*recent-self.cfg.planning.duplicate_penalty_weight*tg-self.cfg.planning.teammate_path_penalty_weight*tp
-            bd={"score":float(score),"info":float(info),"center":float(center),"raw_clearance_m":float(clearance),"distance_cost":float(self.cfg.planning.distance_weight*d),"recent_penalty":float(self.cfg.planning.recent_visit_penalty_weight*recent),"teammate_goal_penalty":float(self.cfg.planning.duplicate_penalty_weight*tg),"teammate_path_penalty":float(self.cfg.planning.teammate_path_penalty_weight*tp),"route_ext":float(re)}
+            recent=self._recent_visit_penalty(approach); failed=self._failed_goal_penalty(approach); tg=self._teammate_goal_penalty(approach,team_goals); tp=self._teammate_path_penalty(approach,team_paths); re=self._route_extension_reward(approach); prior=self._search_prior_reward(approach)
+            score=info+clear_r+center+self.cfg.planning.route_alternate_weight*re+self.cfg.planning.goal_progress_weight*prior-self.cfg.planning.distance_weight*d-self.cfg.planning.recent_visit_penalty_weight*(recent+1.4*failed)-self.cfg.planning.duplicate_penalty_weight*tg-self.cfg.planning.teammate_path_penalty_weight*tp
+            bd={"score":float(score),"info":float(info),"center":float(center),"raw_clearance_m":float(clearance),"distance_cost":float(self.cfg.planning.distance_weight*d),"recent_penalty":float(self.cfg.planning.recent_visit_penalty_weight*recent),"failed_goal_penalty":float(self.cfg.planning.recent_visit_penalty_weight*1.4*failed),"teammate_goal_penalty":float(self.cfg.planning.duplicate_penalty_weight*tg),"teammate_path_penalty":float(self.cfg.planning.teammate_path_penalty_weight*tp),"route_ext":float(re),"search_prior":float(self.cfg.planning.goal_progress_weight*prior)}
             if best is None or score>best[0]: best=(score,approach,bd)
+        if best is None and skipped_near:
+            fr,approach,d,clearance=max(skipped_near,key=lambda x:x[0].information_gain)
+            best=(0.0,approach,{"score":0.0,"info":float(fr.information_gain),"raw_clearance_m":float(clearance),"distance_cost":float(self.cfg.planning.distance_weight*d),"near_fallback":1.0})
         if best is None: return None,"WAIT","no_good_frontier",{}
-        return best[1],"SEARCH_FRONTIER","reward_frontier_selected_local_map_only",best[2]
+        return best[1],"SEARCH_FRONTIER","depth_frontier_selected_local_map_only",best[2]
 
     def _teammate_goal_penalty(self,p:Point,team_goals:dict[int,Point])->float:
-        return sum(math.exp(-distance(g,p)/2.2) for rid,g in team_goals.items() if rid!=self.id and g is not None)
+        pen=0.0
+        my_d=distance(self.est_xy,p)
+        for rid,g in team_goals.items():
+            if rid==self.id or g is None: continue
+            dg=distance(g,p)
+            if dg>6.0: continue
+            base=math.exp(-dg/2.2)
+            mate_pose=self.known_teammate_pose.get(rid)
+            if mate_pose is not None:
+                mate_xy=(float(mate_pose[0]),float(mate_pose[1]))
+                mate_d=distance(mate_xy,g)
+                owner_bonus=1.65 if mate_d<=my_d+1.5 else 0.65
+            else:
+                owner_bonus=1.0
+            pen+=owner_bonus*base
+        return min(2.5,pen)
+    def _should_report_target_to_home(self)->bool:
+        if self.target.source_robot==self.id: return True
+        if any(task=="REPORT_TARGET_HOME" for task in self.known_teammate_tasks.values()): return False
+        my_home_d=distance(self.est_xy,self.home_xy)
+        teammate_home_distances=[
+            distance((float(pose[0]),float(pose[1])),self.home_xy)
+            for pose in self.known_teammate_pose.values()
+        ]
+        return not teammate_home_distances or my_home_d<=min(teammate_home_distances)+1.5
     def _teammate_path_penalty(self,p:Point,team_paths:dict[int,list[Point]])->float:
         pen=0.0
         for rid,pts in team_paths.items():
             if rid==self.id: continue
+            path_pen=0.0
             for q in pts:
                 d=distance(p,q)
-                if d<5.0: pen+=math.exp(-d/1.35)
-        return pen
+                if d<5.0: path_pen=max(path_pen,math.exp(-d/1.35))
+            pen+=path_pen
+        return min(2.0,pen)
     def _recent_visit_penalty(self,p:Point)->float:
         return math.exp(-min(distance(p,q) for q in self.visit_history[-100:])/2.0) if self.visit_history else 0.0
+    def _failed_goal_penalty(self,p:Point)->float:
+        return math.exp(-min(distance(p,q) for q in self.failed_goal_memory)/2.2) if self.failed_goal_memory else 0.0
     def _route_extension_reward(self,p:Point)->float:
         pts=[n.xy for n in self.graph.nodes.values() if n.kind in {"home","anchor","keypoint"}]
         return min(3.0,min(distance(p,q) for q in pts)/3.0) if pts else 0.0
+    def _search_prior_reward(self,p:Point)->float:
+        home_depth=distance(self.home_xy,self.est_xy); cand_depth=distance(self.home_xy,p)
+        depth_gain=max(-1.0,min(4.0,cand_depth-home_depth))
+        prior_progress=max(-2.0,min(5.0,distance(self.est_xy,self.search_prior_xy)-distance(p,self.search_prior_xy)))
+        mission_angle=angle_to(self.home_xy,self.search_prior_xy); cand_angle=angle_to(self.home_xy,p)
+        n=max(1,self.cfg.robot.count); spread=math.radians(44.0)
+        offset=0.0 if n==1 else (self.id/(n-1)-0.5)*spread
+        bearing=math.exp(-abs(wrap_angle(cand_angle-(mission_angle+offset)))/0.55)
+        normalized_depth=min(1.0,cand_depth/max(1e-6,distance(self.home_xy,self.search_prior_xy)))
+        return 0.65*depth_gain+1.05*prior_progress+1.2*bearing+self.cfg.cage.unknown_target_search_bias*normalized_depth
     def _nearest_anchor(self)->Point|None:
         anchors=[n.xy for n in self.graph.nodes.values() if n.kind in {"home","anchor"}]
         return min(anchors,key=lambda p:distance(self.est_xy,p)) if anchors else None

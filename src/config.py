@@ -19,7 +19,9 @@ class WorldConfig:
 class RobotConfig:
     count: int = 4; radius: float = 0.18; max_speed: float = 0.62; turn_gain: float = 2.4
     waypoint_tolerance: float = 0.30; goal_tolerance: float = 0.50; spawn_spacing: float = 0.55
-    path_replan_period_s: float = 1.15; keypoint_spacing: float = 1.25
+    path_replan_period_s: float = 2.2; keypoint_spacing: float = 1.25
+    goal_commit_time_s: float = 7.0; goal_switch_score_margin: float = 2.0
+    stuck_progress_timeout_s: float = 9.0; failed_goal_memory_size: int = 16
     visit_history_spacing_m: float = 0.75; max_visit_history: int = 220
     path_digest_spacing_m: float = 1.15; max_path_digest_points: int = 12
 
@@ -52,12 +54,12 @@ class AssessmentConfig:
 class PlanningConfig:
     inflation_radius_m: float = 0.58; critical_clearance_m: float = 0.46; desired_clearance_m: float = 0.95
     clearance_cost_weight: float = 4.5; unknown_penalty: float = 2.0; max_a_star_expansions: int = 8500
-    frontier_min_cluster_size: int = 4; frontier_sample_count: int = 28; frontier_info_radius_m: float = 1.45
+    frontier_min_cluster_size: int = 4; frontier_sample_count: int = 64; frontier_info_radius_m: float = 1.45
     safe_approach_search_radius_m: float = 2.2; safe_approach_min_clearance_m: float = 0.60
     target_detection_bonus: float = 10.0; distance_weight: float = 0.42
     information_weight: float = 1.35; clearance_weight: float = 1.15; centerline_weight: float = 1.30
-    novelty_weight: float = 0.85; duplicate_penalty_weight: float = 4.0
-    teammate_path_penalty_weight: float = 6.5; recent_visit_penalty_weight: float = 2.2
+    novelty_weight: float = 1.10; duplicate_penalty_weight: float = 2.6
+    teammate_path_penalty_weight: float = 1.8; recent_visit_penalty_weight: float = 3.0
     goal_progress_weight: float = 1.25; route_alternate_weight: float = 0.65
 
 @dataclass(frozen=True)
