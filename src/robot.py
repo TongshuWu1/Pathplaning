@@ -35,6 +35,7 @@ class RobotPacket:
     graph_digest: dict
     target_report: dict | None
     task: str
+    current_goal: Point | None
     estimated_pose: tuple[float, float, float]
     pose_cov_trace: float
 
@@ -76,7 +77,10 @@ class RobotAgent:
         self.status = RobotStatus(task="SEARCH")
         self.target = TargetReport()
         self.known_teammate_goals: dict[int, Point] = {}
+        self.known_teammate_tasks: dict[int, str] = {}
         self.known_teammate_pose: dict[int, tuple[float, float, float]] = {}
+        self.known_teammate_cov: dict[int, float] = {}
+        self.known_teammate_last_seen: dict[int, float] = {}
         self.last_command: tuple[float, float] = (0.0, 0.0)
         self.last_pose_quality: float = 1.0
         self.best_routes: list[RouteCandidate] = []
@@ -170,7 +174,18 @@ class RobotAgent:
         self.received_packets += 1
         self.map.merge_from_digest(packet.map_digest)
         self.graph.merge_from_digest(packet.graph_digest)
-        self.known_teammate_pose[packet.sender_id] = packet.estimated_pose
+        # HOME packets share map/graph/target reports, but they are not teammate intent.
+        if packet.sender_id >= 0:
+            self.known_teammate_pose[packet.sender_id] = packet.estimated_pose
+            self.known_teammate_cov[packet.sender_id] = float(packet.pose_cov_trace)
+            self.known_teammate_last_seen[packet.sender_id] = float(packet.time_s)
+            if packet.task:
+                self.known_teammate_tasks[packet.sender_id] = packet.task
+            if packet.current_goal is not None:
+                gx, gy = packet.current_goal
+                self.known_teammate_goals[packet.sender_id] = (float(gx), float(gy))
+            else:
+                self.known_teammate_goals.pop(packet.sender_id, None)
         if packet.target_report:
             tr = packet.target_report
             if tr.get("detected"):
@@ -180,9 +195,7 @@ class RobotAgent:
                     self.target = TargetReport(True, (float(xy[0]), float(xy[1])), conf, int(tr.get("source_robot", packet.sender_id)), float(tr.get("time_s", packet.time_s)), bool(tr.get("reported_home", False)))
                     tid = self.graph.add_node(self.target.xy, kind="target", confidence=conf, allow_merge=True)
                     self.graph.target_id = tid
-        if packet.task and packet.estimated_pose:
-            # Track teammate intent coarsely for duplicate frontier penalty.
-            pass
+        self._expire_stale_teammate_intent(packet.time_s)
 
     def make_packet(self, time_s: float) -> RobotPacket:
         target_dict = None
@@ -202,11 +215,14 @@ class RobotAgent:
             graph_digest=self.graph.make_digest(self.id, time_s),
             target_report=target_dict,
             task=self.current_task,
+            current_goal=self.current_goal,
             estimated_pose=self.est_pose,
             pose_cov_trace=self.cov_trace,
         )
 
-    def choose_task_and_plan(self, time_s: float, team_goals: dict[int, Point]) -> None:
+    def choose_task_and_plan(self, time_s: float) -> None:
+        self._expire_stale_teammate_intent(time_s)
+        team_goals = self.fresh_teammate_goals(time_s)
         # LiDAR immediate safety dominates the current path, not EKF covariance.
         if self.assessment.blocked_forward and self.path:
             self.path = []
@@ -241,6 +257,30 @@ class RobotAgent:
         self.status.last_plan_reason = result.reason
         self.last_replan_time = time_s
         self.best_routes = self.graph.top_routes(k=4)
+
+    def fresh_teammate_goals(self, time_s: float) -> dict[int, Point]:
+        """Return only teammate goals learned from fresh LOS packets.
+
+        The simulator must not give every robot global teammate intent.  A goal
+        is considered known only after a packet was received from that robot
+        recently enough to still be useful.
+        """
+        self._expire_stale_teammate_intent(time_s)
+        return dict(self.known_teammate_goals)
+
+    def _expire_stale_teammate_intent(self, time_s: float) -> None:
+        timeout = self.cfg.communication.teammate_intent_timeout_s
+        stale = [
+            rid
+            for rid, stamp in self.known_teammate_last_seen.items()
+            if time_s - stamp > timeout
+        ]
+        for rid in stale:
+            self.known_teammate_last_seen.pop(rid, None)
+            self.known_teammate_goals.pop(rid, None)
+            self.known_teammate_tasks.pop(rid, None)
+            self.known_teammate_pose.pop(rid, None)
+            self.known_teammate_cov.pop(rid, None)
 
     def _select_goal_from_lidar_map(self, team_goals: dict[int, Point]) -> tuple[Point | None, str, str]:
         # If target is known, focus on route certification/reporting and route-to-target progress.

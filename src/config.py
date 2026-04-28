@@ -113,6 +113,7 @@ class PlanningConfig:
 class CommunicationConfig:
     radius: float = 6.0
     packet_period_s: float = 0.5
+    teammate_intent_timeout_s: float = 8.0
 
 
 @dataclass(frozen=True)

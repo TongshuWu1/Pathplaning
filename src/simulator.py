@@ -69,9 +69,8 @@ class Simulator:
 
         self.comm_state = self.communication.update(self.robots, self.time_s)
 
-        team_goals = {r.id: r.current_goal for r in self.robots if r.current_goal is not None}
         for robot in self.robots:
-            robot.choose_task_and_plan(self.time_s, team_goals)
+            robot.choose_task_and_plan(self.time_s)
         for robot in self.robots:
             robot.compute_control()
 
