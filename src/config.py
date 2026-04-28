@@ -215,31 +215,9 @@ class SimConfig:
 
 
 
-    # Cooperative stuck recovery / help requests.  A robot that repeatedly
-    # fails to make progress can request a teammate.  The assigned helper
-    # temporarily leaves normal exploration, drives to a safe standoff near the
-    # stuck robot, and acts as a localization / relay anchor so the stuck robot
-    # can replan from better information instead of spinning in place.
-    help_request_enabled: bool = True
-    help_request_blocked_steps: int = 7
-    help_request_route_block_threshold: int = 2
-    help_request_recent_route_block_s: float = 4.0
-    help_request_timeout_s: float = 35.0
-    help_request_clear_good_steps: int = 18
-    help_assignment_replan_period: float = 0.9
-    help_assignment_max_helpers_per_victim: int = 1
-    help_helper_max_cov_trace: float = 2.45
-    help_helper_standoff_m: float = 2.1
-    help_helper_arrival_radius: float = 1.35
-    help_helper_release_s: float = 4.0
-    help_helper_prefer_comm_link: bool = True
-    help_helper_comm_penalty: float = 8.0
-    help_helper_busy_penalty: float = 4.0
-    help_helper_cov_weight: float = 2.0
-    help_helper_plan_through_unknown: bool = True
-    help_victim_cov_shrink: float = 0.92
-    help_victim_cov_floor: float = 0.18
-    help_debug: bool = True
+    # Local self-recovery is intentionally kept as platform infrastructure.
+    # Robots no longer request cooperative rescue; a failed local route is
+    # handled by temporary planning blocks, target invalidation, and replanning.
 
     local_view_alpha: float = 0.88
     show_rays: bool = False

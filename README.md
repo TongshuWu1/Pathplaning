@@ -74,3 +74,7 @@ python main.py
 - The simulation starts **paused** by default.
 - Changing the text-box values takes effect when you press **Reset**.
 - Reset regenerates the world and robot roster from the current controls.
+
+## Cleaned research platform note
+
+This version removes the old cooperative rescue subsystem. Robots now recover locally using temporary route blocks, active goal/path revalidation, and localization-anchor seeking. This keeps the platform focused for the next research layer: LiDAR-guided safe-route graph discovery and certification.

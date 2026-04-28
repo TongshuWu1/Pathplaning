@@ -717,16 +717,6 @@ class SimulatorUI:
                 shared_key_n = sum(len(v) for v in robot.shared_keypoint_memory.values())
                 known_landmark_n = len([info for info in robot.known_landmark_beliefs().values() if not bool(info.get('is_home', False))])
                 route_blocks_n = len(robot.active_route_blocks(self.sim.time_s)) if hasattr(robot, 'active_route_blocks') else 0
-                help_state = getattr(robot, 'help_status', '')
-                if not help_state:
-                    if getattr(robot, 'help_request_active', False):
-                        assigned = getattr(robot, 'help_assigned_helper_id', None)
-                        helper_txt = '-' if assigned is None else f'R{int(assigned) + 1}'
-                        help_state = f'HELP requested helper={helper_txt}'
-                    elif getattr(robot, 'help_target_robot_id', None) is not None:
-                        help_state = f'HELPING R{int(robot.help_target_robot_id) + 1}'
-                    else:
-                        help_state = 'HELP idle'
                 self.local_texts[idx].set_text(
                     f'{robot.name}\n'
                     f'known {known_pct:4.1f}%   frontier {frontier_cells}   pkts {len(robot.received_packets)}   avoid {route_blocks_n}\n'
@@ -734,7 +724,7 @@ class SimulatorUI:
                     f'home {home_state}   hops {hops}   nbrs {len(robot.direct_neighbors)}   lm-bel {known_landmark_n}\n'
                     f'true ({robot.x:4.1f},{robot.y:4.1f})   est ({robot.x_est:4.1f},{robot.y_est:4.1f})\n'
                     f'err {err:4.2f}m   tr(Pxy) {robot.covariance_trace():4.2f}   lm {robot.last_landmark_updates}   team {robot.last_teammate_updates}\n'
-                    f'safety {robot.safety_debug}   {help_state}\n'
+                    f'safety {robot.safety_debug}\n'
                     f'goal {cur_tgt}   {score_text}'
                 )
 

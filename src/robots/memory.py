@@ -19,11 +19,6 @@ class TeammateMemoryRecord:
     target_xy: Optional[Tuple[float, float]] = None
     current_region_id: Optional[int] = None
     current_region_center_xy: Optional[Tuple[float, float]] = None
-    help_request_active: bool = False
-    help_request_xy: Optional[Tuple[float, float]] = None
-    help_request_time: float = 0.0
-    help_request_reason: str = ''
-    help_assigned_helper_id: Optional[int] = None
     home_connected: bool = False
     home_hops: Optional[int] = None
     direct_neighbors: List[int] = field(default_factory=list)
@@ -86,11 +81,6 @@ class TeammateMemoryStore:
         rec.target_xy = None if snap.target_xy is None else (float(snap.target_xy[0]), float(snap.target_xy[1]))
         rec.current_region_id = None if snap.current_region_id is None else int(snap.current_region_id)
         rec.current_region_center_xy = None if snap.current_region_center_xy is None else (float(snap.current_region_center_xy[0]), float(snap.current_region_center_xy[1]))
-        rec.help_request_active = bool(getattr(snap, 'help_request_active', False))
-        rec.help_request_xy = None if getattr(snap, 'help_request_xy', None) is None else (float(snap.help_request_xy[0]), float(snap.help_request_xy[1]))
-        rec.help_request_time = float(getattr(snap, 'help_request_time', 0.0))
-        rec.help_request_reason = str(getattr(snap, 'help_request_reason', ''))
-        rec.help_assigned_helper_id = None if getattr(snap, 'help_assigned_helper_id', None) is None else int(snap.help_assigned_helper_id)
         rec.home_connected = bool(snap.home_connected)
         rec.home_hops = None if snap.home_hops is None else int(snap.home_hops)
         rec.direct_neighbors = [int(v) for v in snap.direct_neighbors]
@@ -121,11 +111,6 @@ class TeammateMemoryStore:
                     target_xy=rec.target_xy,
                     current_region_id=rec.current_region_id,
                     current_region_center_xy=rec.current_region_center_xy,
-                    help_request_active=bool(rec.help_request_active),
-                    help_request_xy=rec.help_request_xy,
-                    help_request_time=float(rec.help_request_time),
-                    help_request_reason=str(rec.help_request_reason),
-                    help_assigned_helper_id=rec.help_assigned_helper_id,
                     home_connected=rec.home_connected,
                     home_hops=rec.home_hops,
                     direct_neighbors=list(rec.direct_neighbors),

@@ -59,16 +59,6 @@ class Robot:
     last_route_block_time: float = -1e9
     route_recovery_count: int = 0
     last_recovery_debug: str = ''
-    help_request_active: bool = False
-    help_request_xy: Optional[Tuple[float, float]] = None
-    help_request_time: float = -1e9
-    help_request_reason: str = ''
-    help_assigned_helper_id: Optional[int] = None
-    help_stable_steps: int = 0
-    help_target_robot_id: Optional[int] = None
-    help_assigned_at: float = -1e9
-    help_arrived_time: float = -1e9
-    help_status: str = ''
     direct_neighbors: List[int] = field(default_factory=list)
     reachable_peer_ids: List[int] = field(default_factory=list)
     home_connected: bool = False
@@ -193,49 +183,6 @@ class Robot:
         self.last_recovery_debug = f'avoid ({x:.1f},{y:.1f}) for {expire - now_f:.0f}s'
         return True
 
-
-    def start_help_request(self, now: Optional[float], reason: str) -> bool:
-        if not bool(getattr(self.cfg, 'help_request_enabled', True)) or now is None:
-            return False
-        now_f = float(now)
-        if self.help_request_active:
-            # Keep the original request time so assignment timeout remains meaningful,
-            # but refresh the location/reason as the robot drifts or replans.
-            self.help_request_xy = (float(self.x_est), float(self.y_est))
-            self.help_request_reason = str(reason)
-            return False
-        self.help_request_active = True
-        self.help_request_xy = (float(self.x_est), float(self.y_est))
-        self.help_request_time = now_f
-        self.help_request_reason = str(reason)
-        self.help_stable_steps = 0
-        self.help_status = f'HELP requested: {reason}'
-        return True
-
-    def clear_help_request(self, reason: str = '') -> None:
-        self.help_request_active = False
-        self.help_request_xy = None
-        self.help_request_reason = ''
-        self.help_assigned_helper_id = None
-        self.help_stable_steps = 0
-        self.help_status = '' if not reason else f'HELP cleared: {reason}'
-
-    def assign_helper(self, helper_id: Optional[int], now: Optional[float]) -> None:
-        self.help_assigned_helper_id = None if helper_id is None else int(helper_id)
-        if helper_id is not None and now is not None:
-            self.help_status = f'HELP assigned R{int(helper_id) + 1}'
-
-    def begin_helping(self, victim_id: int, now: Optional[float]) -> None:
-        self.help_target_robot_id = int(victim_id)
-        self.help_assigned_at = float(now) if now is not None else self.help_assigned_at
-        self.help_arrived_time = -1e9
-        self.help_status = f'HELPING R{int(victim_id) + 1}'
-
-    def clear_helping(self, reason: str = '') -> None:
-        self.help_target_robot_id = None
-        self.help_assigned_at = -1e9
-        self.help_arrived_time = -1e9
-        self.help_status = '' if not reason else f'HELP done: {reason}'
 
     def absolute_update_age(self, now: Optional[float]) -> float:
         if now is None:
@@ -433,11 +380,6 @@ class Robot:
             target_xy=self.current_target,
             current_region_id=self.current_region_id,
             current_region_center_xy=self.current_region_center_xy,
-            help_request_active=bool(self.help_request_active),
-            help_request_xy=self.help_request_xy,
-            help_request_time=float(self.help_request_time),
-            help_request_reason=str(self.help_request_reason),
-            help_assigned_helper_id=self.help_assigned_helper_id,
             home_connected=bool(self.home_connected),
             home_hops=self.home_hops,
             direct_neighbors=list(self.direct_neighbors),
@@ -515,13 +457,6 @@ class Robot:
                 'current_mode': self.current_mode,
                 'current_region_id': self.current_region_id,
                 'current_region_center_xy': None if self.current_region_center_xy is None else [float(self.current_region_center_xy[0]), float(self.current_region_center_xy[1])],
-                'help_request_active': bool(self.help_request_active),
-                'help_request_xy': None if self.help_request_xy is None else [float(self.help_request_xy[0]), float(self.help_request_xy[1])],
-                'help_request_time': float(self.help_request_time),
-                'help_request_reason': str(self.help_request_reason),
-                'help_assigned_helper_id': self.help_assigned_helper_id,
-                'help_target_robot_id': self.help_target_robot_id,
-                'help_status': str(self.help_status),
                 'home_connected': bool(self.home_connected),
                 'home_hops': self.home_hops,
                 'direct_neighbors': list(self.direct_neighbors),
@@ -657,10 +592,6 @@ class Robot:
                 self.localization_safety_state = 'critical'
                 recovery = f'; {self.last_recovery_debug}' if route_block_added or self.last_recovery_debug else ''
                 self.safety_debug = f'blocked recovery requested ({self.blocked_steps} blocked steps){recovery}'
-            if self.blocked_steps >= int(getattr(self.cfg, 'help_request_blocked_steps', 7)):
-                reason = f'stuck {self.blocked_steps} steps'
-                if self.start_help_request(now, reason):
-                    self.logger.log(now if now is not None else 0.0, 'help-request', reason=reason, pose_xy=self.est_pose_xy())
             if self.blocked_steps >= self.cfg.blocked_replan_steps:
                 self.current_path = []
                 self.current_target = None

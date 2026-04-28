@@ -229,17 +229,11 @@ class Simulator:
             )
 
         self._update_mission_phase_before_planning()
-        self._update_help_requests_and_assignments()
-
         provisional_claims = {}
         team_robot_states = self._team_robot_states()
         for robot in self.robots:
             if self.mission_phase == 'complete':
                 self._hold_robot_at_home(robot)
-                continue
-
-            if self._update_helping_behavior(robot):
-                robot.follow_path(self.cfg.dt, self.world.obstacles, now=self.time_s)
                 continue
 
             if self.mission_phase == 'return_home':
@@ -365,11 +359,6 @@ class Simulator:
             robot.logger.write_snapshot(robot.knowledge_snapshot(self.time_s), now=self.time_s, min_period_s=self.cfg.log_snapshot_period_s)
 
     def _localization_safety_level(self, robot: Robot) -> str:
-        # While a help request is active, keep the victim in recovery behavior
-        # even if the covariance has not yet grown.  The symptom is physical
-        # non-progress, not only estimator uncertainty.
-        if getattr(robot, 'help_request_active', False):
-            return 'critical' if robot.blocked_steps > 0 else 'recover'
         return robot.localization_state(self.time_s)
 
     def _make_exploration_planning_map(self, robot: Robot) -> np.ndarray:
@@ -506,301 +495,6 @@ class Simulator:
         return None
 
 
-    def _robot_by_id(self, robot_id: int) -> Optional[Robot]:
-        for robot in self.robots:
-            if robot.robot_id == int(robot_id):
-                return robot
-        return None
-
-    def _release_help_request(self, victim: Robot, reason: str) -> None:
-        helper_id = victim.help_assigned_helper_id
-        victim.clear_help_request(reason)
-        if helper_id is not None:
-            helper = self._robot_by_id(helper_id)
-            if helper is not None and helper.help_target_robot_id == victim.robot_id:
-                helper.current_path = []
-                helper.current_target = None
-                helper.current_mode = 'idle'
-                helper.request_replan = True
-                helper.clear_helping(reason)
-                helper.logger.log(self.time_s, 'help-release', victim_id=victim.robot_id, reason=reason)
-        victim.logger.log(self.time_s, 'help-request-clear', reason=reason)
-
-    def _update_help_requests_and_assignments(self) -> None:
-        if not bool(getattr(self.cfg, 'help_request_enabled', True)):
-            return
-
-        # 1) Open/clear victim requests from motion and localization evidence.
-        for robot in self.robots:
-            if self.mission_phase == 'complete' or robot.current_mode == 'home':
-                if robot.help_request_active:
-                    self._release_help_request(robot, 'at home / complete')
-                if robot.help_target_robot_id is not None:
-                    robot.clear_helping('mission complete')
-                continue
-
-            recent_route_block = (self.time_s - float(robot.last_route_block_time)) <= float(
-                getattr(self.cfg, 'help_request_recent_route_block_s', 4.0)
-            )
-            repeated_route_fail = (
-                int(robot.route_recovery_count) >= int(getattr(self.cfg, 'help_request_route_block_threshold', 2))
-                and recent_route_block
-            )
-            blocked_long = robot.blocked_steps >= int(getattr(self.cfg, 'help_request_blocked_steps', 7))
-            bad_motion = robot.motion_state in {'blocked', 'stalled', 'route-replan', 'skip-waypoint'}
-            critical_localization = robot.localization_state(self.time_s) == 'critical'
-            if blocked_long or (bad_motion and repeated_route_fail) or (critical_localization and recent_route_block):
-                if blocked_long:
-                    reason = f'blocked {robot.blocked_steps} steps'
-                elif repeated_route_fail:
-                    reason = f'repeated route failure ({robot.route_recovery_count})'
-                else:
-                    reason = 'critical localization after stuck route'
-                if robot.start_help_request(self.time_s, reason):
-                    robot.logger.log(self.time_s, 'help-request', reason=reason, pose_xy=robot.est_pose_xy())
-
-            if robot.help_request_active:
-                stable = (
-                    robot.motion_state == 'move'
-                    and robot.blocked_steps == 0
-                    and not robot.request_replan
-                    and robot.localization_state(self.time_s) in {'nominal', 'caution'}
-                )
-                robot.help_stable_steps = robot.help_stable_steps + 1 if stable else 0
-                if robot.help_stable_steps >= int(getattr(self.cfg, 'help_request_clear_good_steps', 18)):
-                    self._release_help_request(robot, 'recovered motion')
-                    continue
-                if (
-                    robot.help_assigned_helper_id is None
-                    and self.time_s - float(robot.help_request_time) > float(getattr(self.cfg, 'help_request_timeout_s', 35.0))
-                ):
-                    self._release_help_request(robot, 'request timeout')
-                    continue
-
-        # 2) Remove invalid helper assignments.
-        for helper in self.robots:
-            if helper.help_target_robot_id is None:
-                continue
-            victim = self._robot_by_id(helper.help_target_robot_id)
-            if victim is None or not victim.help_request_active or victim.help_assigned_helper_id != helper.robot_id:
-                helper.current_path = []
-                helper.current_target = None
-                helper.current_mode = 'idle'
-                helper.request_replan = True
-                helper.clear_helping('victim no longer needs help')
-
-        # 3) Assign one helper to every active request that does not already have one.
-        for victim in self.robots:
-            if not victim.help_request_active:
-                continue
-            assigned = self._robot_by_id(victim.help_assigned_helper_id) if victim.help_assigned_helper_id is not None else None
-            if assigned is not None and assigned.help_target_robot_id == victim.robot_id:
-                continue
-            best = self._choose_helper_for_victim(victim)
-            if best is None:
-                victim.help_status = f'HELP requested: {victim.help_request_reason}; no helper free'
-                continue
-            helper, score = best
-            victim.assign_helper(helper.robot_id, self.time_s)
-            helper.begin_helping(victim.robot_id, self.time_s)
-            helper.current_path = []
-            helper.current_target = None
-            helper.current_mode = 'help'
-            helper.request_replan = True
-            victim.logger.log(self.time_s, 'help-assigned', helper_id=helper.robot_id, score=score)
-            helper.logger.log(self.time_s, 'help-accepted', victim_id=victim.robot_id, score=score)
-
-    def _choose_helper_for_victim(self, victim: Robot) -> Optional[Tuple[Robot, float]]:
-        victim_xy = victim.help_request_xy if victim.help_request_xy is not None else victim.est_pose_xy()
-        options: List[Tuple[float, Robot]] = []
-        any_comm = False
-        for helper in self.robots:
-            if helper.robot_id == victim.robot_id:
-                continue
-            if helper.help_request_active:
-                continue
-            if helper.help_target_robot_id is not None and helper.help_target_robot_id != victim.robot_id:
-                continue
-            if helper.current_mode == 'home' and self.mission_phase == 'return_home':
-                # A robot already verified at home is less useful as a rescue agent.
-                continue
-            comm_link = self._robots_have_help_link(victim, helper)
-            any_comm = any_comm or comm_link
-            cov = helper.covariance_trace()
-            cov_limit = float(getattr(self.cfg, 'help_helper_max_cov_trace', 2.45))
-            # Prefer reliable helpers, but do not make help impossible if all
-            # nearby robots are a bit uncertain.
-            if cov > cov_limit and len(self.robots) > 2:
-                cov_penalty = float(getattr(self.cfg, 'help_helper_cov_weight', 2.0)) * (cov - cov_limit + 1.0)
-            else:
-                cov_penalty = float(getattr(self.cfg, 'help_helper_cov_weight', 2.0)) * cov
-            dist = math.hypot(helper.x_est - victim_xy[0], helper.y_est - victim_xy[1])
-            busy_penalty = float(getattr(self.cfg, 'help_helper_busy_penalty', 4.0)) if helper.current_mode in {'return', 'localize'} else 0.0
-            comm_penalty = 0.0 if comm_link else float(getattr(self.cfg, 'help_helper_comm_penalty', 8.0))
-            score = dist + cov_penalty + busy_penalty + comm_penalty
-            options.append((score, helper))
-        if not options:
-            return None
-        if bool(getattr(self.cfg, 'help_helper_prefer_comm_link', True)) and any_comm:
-            linked = [(score, helper) for score, helper in options if self._robots_have_help_link(victim, helper)]
-            if linked:
-                options = linked
-        score, helper = min(options, key=lambda item: item[0])
-        return helper, float(score)
-
-    def _robots_have_help_link(self, a: Robot, b: Robot) -> bool:
-        if b.robot_id in a.direct_neighbors or a.robot_id in b.direct_neighbors:
-            return True
-        if b.robot_id in a.reachable_peer_ids or a.robot_id in b.reachable_peer_ids:
-            return True
-        # Fallback to instantaneous LOS radio, useful just after motion and before
-        # the next communication graph refresh.
-        return self._robot_link(a.pose_xy(), b.pose_xy())
-
-    def _make_help_map(self, helper: Robot, victim: Robot) -> np.ndarray:
-        data = np.array(helper.local_map.data, copy=True)
-        if bool(getattr(self.cfg, 'help_helper_plan_through_unknown', True)):
-            data[data == UNKNOWN] = FREE
-        # Keep the helper body and victim/request region navigable.  This does not
-        # alter the true map; it only prevents a stale local grid from making help
-        # impossible before the helper has scanned the area.
-        radius = max(self.cfg.robot_radius * 2.5, self.grid.res * 3.0)
-        for x, y in [helper.est_pose_xy(), victim.help_request_xy or victim.est_pose_xy(), victim.est_pose_xy()]:
-            gx, gy = self.grid.world_to_grid(float(x), float(y))
-            cells = int(math.ceil(radius / self.grid.res))
-            for yy in range(max(0, gy - cells), min(self.grid.ny, gy + cells + 1)):
-                for xx in range(max(0, gx - cells), min(self.grid.nx, gx + cells + 1)):
-                    wx, wy = self.grid.grid_to_world(xx, yy)
-                    if (wx - x) ** 2 + (wy - y) ** 2 <= radius ** 2 and data[yy, xx] != OCCUPIED:
-                        data[yy, xx] = FREE
-        return self._apply_temporary_route_blocks(helper, data, protect_points=[victim.est_pose_xy()], protect_home=True)
-
-    def _help_standoff_candidates(self, helper: Robot, victim: Robot) -> List[Tuple[float, float]]:
-        vx, vy = victim.help_request_xy if victim.help_request_xy is not None else victim.est_pose_xy()
-        standoff = float(getattr(self.cfg, 'help_helper_standoff_m', 2.1))
-        # Try the side the helper is currently on first, then a ring around victim.
-        base_angle = math.atan2(helper.y_est - vy, helper.x_est - vx)
-        angles = [base_angle, base_angle + 0.55, base_angle - 0.55, base_angle + 1.1, base_angle - 1.1]
-        angles.extend([2.0 * math.pi * i / 16.0 for i in range(16)])
-        out: List[Tuple[float, float]] = []
-        seen = set()
-        for ang in angles:
-            x = clamp(vx + standoff * math.cos(ang), self.cfg.robot_radius, self.cfg.world_w - self.cfg.robot_radius)
-            y = clamp(vy + standoff * math.sin(ang), self.cfg.robot_radius, self.cfg.world_h - self.cfg.robot_radius)
-            key = (round(x, 2), round(y, 2))
-            if key in seen:
-                continue
-            seen.add(key)
-            if self.planner.exact_world_collision(x, y):
-                continue
-            out.append((float(x), float(y)))
-        if not out:
-            out.append((vx, vy))
-        return out
-
-    def _best_help_path(self, helper: Robot, victim: Robot) -> Optional[Tuple[List[Tuple[float, float]], Tuple[float, float], float]]:
-        help_map = self._make_help_map(helper, victim)
-        best: Optional[Tuple[float, List[Tuple[float, float]], Tuple[float, float], float]] = None
-        for target_xy in self._help_standoff_candidates(helper, victim):
-            path = self.planner.plan(helper.est_pose_xy(), target_xy, help_map)
-            if path is None or len(path) < 2:
-                continue
-            path_len = float(self.planner.last_plan_stats.path_length_m)
-            # Prefer approaches that stop with line of sight to the victim if possible.
-            vx, vy = victim.pose_xy()
-            los_bonus = -1.25 if line_of_sight(target_xy, (vx, vy), self.world.obstacles) else 0.0
-            score = path_len + los_bonus
-            if best is None or score < best[0]:
-                best = (score, path, target_xy, path_len)
-        if best is None:
-            return None
-        _score, path, target_xy, path_len = best
-        return path, target_xy, path_len
-
-    def _update_helping_behavior(self, helper: Robot) -> bool:
-        if helper.help_target_robot_id is None:
-            return False
-        victim = self._robot_by_id(helper.help_target_robot_id)
-        if victim is None or not victim.help_request_active:
-            helper.clear_helping('victim recovered')
-            return False
-
-        # If the helper itself starts failing, release it so it can recover and
-        # so another teammate can be chosen later.
-        if helper.help_request_active:
-            helper.clear_helping('helper needs own recovery')
-            if victim.help_assigned_helper_id == helper.robot_id:
-                victim.assign_helper(None, self.time_s)
-            return False
-
-        victim_xy = victim.help_request_xy if victim.help_request_xy is not None else victim.est_pose_xy()
-        dist_est = math.hypot(helper.x_est - victim_xy[0], helper.y_est - victim_xy[1])
-        arrival_r = float(getattr(self.cfg, 'help_helper_arrival_radius', 1.35))
-        los_true = line_of_sight(helper.pose_xy(), victim.pose_xy(), self.world.obstacles)
-        close_true = math.hypot(helper.x - victim.x, helper.y - victim.y) <= max(self.cfg.teammate_obs_range, arrival_r + 0.5)
-        if dist_est <= arrival_r or (los_true and close_true and dist_est <= self.cfg.teammate_obs_range):
-            if helper.help_arrived_time < 0.0:
-                helper.help_arrived_time = self.time_s
-                helper.logger.log(self.time_s, 'help-arrived', victim_id=victim.robot_id)
-            helper.current_path = []
-            helper.current_target = victim_xy
-            helper.current_mode = 'help'
-            helper.request_replan = False
-            helper.motion_state = 'helping'
-            helper.last_plan_time = self.time_s
-            # The physical effect of help is a stronger relative localization
-            # opportunity and a forced route rethink by the victim.  Keep this
-            # small so it complements, not replaces, the EKF teammate update.
-            shrink = float(getattr(self.cfg, 'help_victim_cov_shrink', 0.92))
-            floor = float(getattr(self.cfg, 'help_victim_cov_floor', 0.18))
-            if los_true:
-                victim.P[0, 0] = max(floor, float(victim.P[0, 0]) * shrink)
-                victim.P[1, 1] = max(floor, float(victim.P[1, 1]) * shrink)
-                victim.P = 0.5 * (victim.P + victim.P.T)
-                victim.last_absolute_update_time = max(victim.last_absolute_update_time, self.time_s - 0.05)
-            if victim.blocked_steps > 0 or victim.current_mode in {'localize', 'idle'}:
-                victim.request_replan = True
-                victim.current_path = []
-            helper.last_choice_debug = (
-                f'HELP hold near R{victim.robot_id + 1}\n'
-                f'd={dist_est:3.1f}m los={"yes" if los_true else "no"} victim={victim.help_request_reason}'
-            )
-            victim.help_status = f'HELP assisted by R{helper.robot_id + 1}'
-            return True
-
-        replan_due = (self.time_s - helper.last_plan_time) >= float(getattr(self.cfg, 'help_assignment_replan_period', 0.9))
-        same_target = helper.current_mode == 'help' and helper.current_target is not None and math.hypot(
-            helper.current_target[0] - victim_xy[0], helper.current_target[1] - victim_xy[1]
-        ) <= max(2.5 * arrival_r, 0.1)
-        if helper.current_mode == 'help' and helper.current_path and not helper.request_replan and not replan_due and same_target:
-            helper.last_choice_debug = (
-                f'HELP continue to R{victim.robot_id + 1}\n'
-                f'd={dist_est:3.1f}m victim={victim.help_request_reason}'
-            )
-            return True
-
-        best = self._best_help_path(helper, victim)
-        helper.current_mode = 'help'
-        helper.current_region_id = None
-        helper.current_region_center_xy = None
-        helper.region_hold_until = -1e9
-        helper.last_plan_time = self.time_s
-        helper.last_target_time = self.time_s
-        helper.request_replan = False
-        if best is None:
-            helper.current_path = []
-            helper.current_target = victim_xy
-            helper.last_choice_debug = f'HELP requested for R{victim.robot_id + 1}\nno help path yet'
-            return True
-        path, target_xy, path_len = best
-        helper.current_path = path[1:]
-        helper.current_target = target_xy
-        helper.last_choice_debug = (
-            f'HELP to R{victim.robot_id + 1} standoff\n'
-            f'target=({target_xy[0]:.1f},{target_xy[1]:.1f}) len={path_len:3.1f}m'
-        )
-        helper.logger.log(self.time_s, 'help-plan', victim_id=victim.robot_id, target_xy=target_xy, path_len=path_len)
-        return True
 
     def _apply_temporary_route_blocks(
         self,
@@ -987,16 +681,8 @@ class Simulator:
         # known non-home landmarks unless they are unavailable.
         add(self._home_xy(), 'home-marker', 1.15)
 
-        assigned_helper_id = getattr(robot, 'help_assigned_helper_id', None)
         for other in self.robots:
             if other.robot_id == robot.robot_id:
-                continue
-            if other.robot_id == assigned_helper_id:
-                # A requested helper is the best local anchor because it is
-                # explicitly moving toward the stuck robot.  Add it even before
-                # it becomes a direct neighbor so the victim can bias recovery
-                # toward the incoming teammate when it replans.
-                add(other.est_pose_xy(), f'assigned-helper-{other.robot_id + 1}', -0.35)
                 continue
             if other.robot_id in robot.direct_neighbors or other.robot_id in robot.reachable_peer_ids:
                 cov = other.covariance_trace()
@@ -1004,7 +690,7 @@ class Simulator:
                 add(other.est_pose_xy(), f'teammate-{other.robot_id + 1}', priority)
 
         # If only home exists, this returns home.  Sort so landmarks/nearby
-        # reliable teammates are attempted first.
+        # reachable teammates are attempted first.
         anchors.sort(key=lambda item: (item[2], math.hypot(item[0][0] - robot.x_est, item[0][1] - robot.y_est)))
         return anchors[:10]
 
