@@ -341,7 +341,7 @@ class OccupancyGrid:
             return 0.0
         return min(self.segment_min_clearance(a, b, max_radius_m) for a, b in zip(path[:-1], path[1:]))
 
-    def merge_from_digest(self, digest: dict) -> None:
+    def merge_from_digest(self, digest: dict, combine_sources: bool = False) -> None:
         # Lightweight packet fusion: combine observations from independent robots.
         idx = digest.get("cells", [])
         vals = digest.get("logodds", [])
@@ -370,7 +370,7 @@ class OccupancyGrid:
             else:
                 same_sign = (current_lo >= 0 and incoming_lo >= 0) or (current_lo <= 0 and incoming_lo <= 0)
                 new_sources = incoming_mask & ~current_mask
-                if new_sources and same_sign:
+                if combine_sources and new_sources and same_sign:
                     extra_sources = max(1, int(new_sources).bit_count())
                     new_lo = clamp(current_lo + min(0.45, 0.22 * extra_sources) * incoming_lo, self.cfg.logodds_min, self.cfg.logodds_max)
                     new_q = min(1.0, max(current_q, incoming_q) + 0.08 * extra_sources * incoming_q * (1.0 - current_q))

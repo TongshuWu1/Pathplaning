@@ -93,7 +93,7 @@ class CommunicationManager:
             self.home_memory.known_robot_paths[packet.sender_id] = list(packet.current_path_digest)
             self.home_memory.known_robot_visits[packet.sender_id] = list(packet.visited_digest)
             self.home_memory.known_robot_time[packet.sender_id] = float(packet.time_s)
-        self.home_memory.map.merge_from_digest(packet.map_digest)
+        self.home_memory.map.merge_from_digest(packet.map_digest, combine_sources=True)
         self.home_memory.graph.merge_from_digest(packet.graph_digest)
         self.home_memory.graph.mark_all_reported_home()
         if packet.target_report and packet.target_report.get("detected"):

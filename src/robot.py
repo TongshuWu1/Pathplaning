@@ -12,7 +12,7 @@ from .cage_graph import RouteGraph, RouteCandidate
 from .config import AppConfig
 from .geometry import Point, Pose, angle_to, distance, wrap_angle
 from .lidar_assessment import LidarAssessment, assess_lidar
-from .localization import LandmarkObservation, PoseEstimator
+from .localization import PoseEstimator
 from .mapping import FrontierCluster, OccupancyGrid
 from .planner import GridPlanner
 from .sensors import LidarScan, LidarSensor
@@ -97,24 +97,12 @@ class RobotAgent:
 
     def sense_update_map_and_belief(self, world: World, time_s: float) -> None:
         visible_landmarks=world.visible_landmarks(tuple(self.true_pose), self.cfg.world.landmark_detection_range)
-        observations=self._landmark_observations(visible_landmarks)
-        self.estimator.update_with_landmark_observations(observations, self.cfg.world.landmark_detection_range)
+        self.estimator.update_with_landmarks(visible_landmarks, self.cfg.world.landmark_detection_range)
         self.scan=self.lidar.sense(world, tuple(self.true_pose)); self.last_pose_quality=self.estimator.quality()
         prev=None if self.assessment.decision_note=="init" else self.assessment.consistency
         self.map.update_from_lidar(self.est_pose,self.scan,self.last_pose_quality,self.id,time_s)
         self.assessment=assess_lidar(self.map,self.est_pose,self.scan,self.cfg.lidar,self.cfg.assessment,prev)
         self._update_visit_history(); self._detect_target(world,time_s); self._update_route_graph(time_s)
-
-    def _landmark_observations(self, landmarks)->list[LandmarkObservation]:
-        true_xy=(float(self.true_pose[0]),float(self.true_pose[1])); true_th=float(self.true_pose[2])
-        out=[]
-        for lm in landmarks:
-            r_std=self.cfg.motion.home_range_std if lm.is_home else self.cfg.motion.landmark_range_std
-            b_std=math.radians(self.cfg.motion.home_bearing_std_deg if lm.is_home else self.cfg.motion.landmark_bearing_std_deg)
-            rr=max(0.02,distance(true_xy,lm.xy)+self.rng.normal(0.0,r_std))
-            bb=wrap_angle(angle_to(true_xy,lm.xy)-true_th+self.rng.normal(0.0,b_std))
-            out.append(LandmarkObservation(lm,rr,bb,r_std,b_std))
-        return out
 
     def _update_visit_history(self)->None:
         xy=self.est_xy
@@ -211,6 +199,10 @@ class RobotAgent:
             simplified=self._downsample_path(result.path,spacing=0.45); simp_clear=self.map.path_min_clearance(simplified)
             self.path=simplified if simp_clear>=self.cfg.planning.critical_clearance_m else result.path; self.path_index=0
             self.status.last_path_min_clearance=max(0.0,min(result.min_clearance,simp_clear if simplified else result.min_clearance))
+        elif task in {"REPORT_TARGET_HOME","RETURN_HOME_CERT_ROUTE"}:
+            self.path=self._homing_fallback_path(goal); self.path_index=0
+            result.success=bool(self.path); result.reason="homing_fallback" if self.path else result.reason
+            self.status.last_path_min_clearance=max(0.0,min(self.assessment.front_clearance,self.assessment.left_clearance,self.assessment.right_clearance))
         else:
             self._remember_failed_goal(goal); self.path=[]; self.path_index=0; self.status.last_path_min_clearance=0.0
         self.status.last_plan_success=result.success; self.status.last_plan_reason=result.reason; self.last_replan_time=time_s; self.best_routes=self.graph.top_routes(k=4)
@@ -366,6 +358,18 @@ class RobotAgent:
         for p in path[1:-1]:
             if distance(last,p)>=spacing: out.append(p); last=p
         out.append(path[-1]); return out
+    def _homing_fallback_path(self,goal:Point)->list[Point]:
+        d=distance(self.est_xy,goal)
+        if d<=self.cfg.robot.goal_tolerance: return []
+        desired=angle_to(self.est_xy,goal)
+        if self.assessment.blocked_forward or self.assessment.front_clearance<self.cfg.planning.critical_clearance_m:
+            desired=self.est_pose[2]+self.assessment.best_open_angle
+        step=min(1.6,max(0.6,d))
+        p=(self.est_xy[0]+math.cos(desired)*step,self.est_xy[1]+math.sin(desired)*step)
+        cell=self.map.world_to_cell(p)
+        if cell is None:
+            return []
+        return [self.est_xy,p]
     def compute_control(self)->tuple[float,float]:
         if not self.path or self.path_index>=len(self.path): self.last_command=(0.0,0.0); return self.last_command
         pos=self.est_xy; target=self.path[self.path_index]

@@ -32,8 +32,6 @@ class MotionNoiseConfig:
     xy_std_per_m: float = 0.035; theta_std_per_rad: float = 0.025
     process_xy: float = 0.018; process_theta: float = 0.014
     landmark_xy_gain: float = 0.55; landmark_cov_shrink: float = 0.55
-    landmark_range_std: float = 0.18; landmark_bearing_std_deg: float = 4.0
-    home_range_std: float = 0.06; home_bearing_std_deg: float = 1.2
 
 @dataclass(frozen=True)
 class LidarConfig:
@@ -68,7 +66,7 @@ class PlanningConfig:
 
 @dataclass(frozen=True)
 class CommunicationConfig:
-    radius: float = 8.0; packet_period_s: float = 0.5; teammate_intent_timeout_s: float = 8.0
+    radius: float = 14.0; packet_period_s: float = 0.5; teammate_intent_timeout_s: float = 8.0
 
 @dataclass(frozen=True)
 class CageConfig:

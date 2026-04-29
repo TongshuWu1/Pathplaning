@@ -37,15 +37,6 @@ class PoseBelief:
         return (float(self.pose[0]), float(self.pose[1]), float(self.pose[2]))
 
 
-@dataclass(frozen=True)
-class LandmarkObservation:
-    landmark: Landmark
-    range_m: float
-    bearing_rad: float
-    range_std: float
-    bearing_std: float
-
-
 class PoseEstimator:
     def __init__(self, initial_pose: Pose, cfg: MotionNoiseConfig, rng: np.random.Generator):
         self.cfg = cfg
@@ -90,53 +81,11 @@ class PoseEstimator:
             correction /= total_w
             self.belief.pose[0:2] += self.cfg.landmark_xy_gain * correction
         shrink = max(0.15, self.cfg.landmark_cov_shrink ** max(1, len(visible)))
+        if any(lm.is_home for lm in visible):
+            shrink *= 0.55
         self.belief.covariance[:2, :2] *= shrink
         self.belief.covariance[2, 2] *= max(0.35, shrink)
         self.belief.covariance = 0.5 * (self.belief.covariance + self.belief.covariance.T)
-
-    def update_with_landmark_observations(self, observations: list[LandmarkObservation], detection_range: float) -> None:
-        if not observations:
-            return
-        for obs in observations:
-            self._ekf_landmark_update(obs)
-        shrink = max(0.12, self.cfg.landmark_cov_shrink ** max(1, len(observations)))
-        if any(obs.landmark.is_home for obs in observations):
-            shrink *= 0.55
-        self.belief.covariance[:2, :2] *= shrink
-        self.belief.covariance[2, 2] *= max(0.25, shrink)
-        self.belief.covariance = 0.5 * (self.belief.covariance + self.belief.covariance.T)
-
-    def _ekf_landmark_update(self, obs: LandmarkObservation) -> None:
-        x, y, th = self.belief.pose
-        lx, ly = obs.landmark.xy
-        rel_x = lx - x
-        rel_y = ly - y
-        q = max(rel_x * rel_x + rel_y * rel_y, 1e-6)
-        pred_range = math.sqrt(q)
-        pred_bearing = wrap_angle(math.atan2(rel_y, rel_x) - th)
-        residual = np.array([
-            obs.range_m - pred_range,
-            wrap_angle(obs.bearing_rad - pred_bearing),
-        ])
-        h = np.array([
-            [-rel_x / pred_range, -rel_y / pred_range, 0.0],
-            [rel_y / q, -rel_x / q, -1.0],
-        ])
-        r = np.diag([
-            max(obs.range_std, 1e-3) ** 2,
-            max(obs.bearing_std, 1e-4) ** 2,
-        ])
-        p = self.belief.covariance
-        s = h @ p @ h.T + r
-        try:
-            k = p @ h.T @ np.linalg.inv(s)
-        except np.linalg.LinAlgError:
-            return
-        delta = k @ residual
-        self.belief.pose += delta
-        self.belief.pose[2] = wrap_angle(float(self.belief.pose[2]))
-        i = np.eye(3)
-        self.belief.covariance = (i - k @ h) @ p @ (i - k @ h).T + k @ r @ k.T
 
     def quality(self) -> float:
         # Map update confidence derived from pose covariance.  High covariance
