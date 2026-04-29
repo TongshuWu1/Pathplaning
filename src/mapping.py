@@ -36,6 +36,7 @@ class OccupancyGrid:
         self.quality = np.zeros((self.ny, self.nx), dtype=float)
         self.last_seen = np.full((self.ny, self.nx), -np.inf, dtype=float)
         self.source = np.full((self.ny, self.nx), -1, dtype=int)
+        self.source_mask = np.zeros((self.ny, self.nx), dtype=np.int64)
         self._version = 0
         self._clearance_cache = None
         self._clearance_cache_key = None
@@ -46,9 +47,13 @@ class OccupancyGrid:
         other.quality = self.quality.copy()
         other.last_seen = self.last_seen.copy()
         other.source = self.source.copy()
+        other.source_mask = self.source_mask.copy()
         other._version = self._version
         return other
 
+
+    def _source_bit(self, robot_id: int) -> int:
+        return 1 << robot_id if 0 <= robot_id < 62 else 0
 
     def _invalidate_cache(self) -> None:
         self._version += 1
@@ -178,6 +183,7 @@ class OccupancyGrid:
         self.quality[j, i] = max(current_q * 0.995, obs_quality)
         self.last_seen[j, i] = time_s
         self.source[j, i] = robot_id
+        self.source_mask[j, i] |= self._source_bit(robot_id)
 
     def update_from_lidar(self, est_pose: Pose, scan: LidarScan, pose_quality: float, robot_id: int, time_s: float) -> None:
         start = self.world_to_cell((est_pose[0], est_pose[1]))
@@ -279,10 +285,23 @@ class OccupancyGrid:
         i, j = cell
         return float(self.clearance_map(max_radius_m)[j, i])
 
-    def safe_approach_point(self, frontier: FrontierCluster, start: Point, search_radius_m: float, min_clearance_m: float, desired_clearance_m: float) -> Point:
-        clearance = self.clearance_map(max_radius_m=max(3.0, desired_clearance_m * 2.5))
-        free = self.free_mask()
-        known = self.known_mask()
+    def safe_approach_point(
+        self,
+        frontier: FrontierCluster,
+        start: Point,
+        search_radius_m: float,
+        min_clearance_m: float,
+        desired_clearance_m: float,
+        clearance: np.ndarray | None = None,
+        free: np.ndarray | None = None,
+        known: np.ndarray | None = None,
+    ) -> Point:
+        if clearance is None:
+            clearance = self.clearance_map(max_radius_m=max(3.0, desired_clearance_m * 2.5))
+        if free is None:
+            free = self.free_mask()
+        if known is None:
+            known = self.known_mask()
         centroid = frontier.centroid_world
         ccell = self.world_to_cell(centroid)
         if ccell is None:
@@ -323,21 +342,54 @@ class OccupancyGrid:
         return min(self.segment_min_clearance(a, b, max_radius_m) for a, b in zip(path[:-1], path[1:]))
 
     def merge_from_digest(self, digest: dict) -> None:
-        # Lightweight packet fusion: accept higher-quality cells from teammates.
+        # Lightweight packet fusion: combine observations from independent robots.
         idx = digest.get("cells", [])
         vals = digest.get("logodds", [])
         quals = digest.get("quality", [])
+        masks = digest.get("source_mask", [])
         src = int(digest.get("source_robot", -1))
         t = float(digest.get("time_s", 0.0))
         changed = False
-        for (i, j), lo, q in zip(idx, vals, quals):
+        src_bit = self._source_bit(src)
+        for k, ((i, j), lo, q) in enumerate(zip(idx, vals, quals)):
             if not (0 <= i < self.nx and 0 <= j < self.ny):
                 continue
-            if float(q) > self.quality[j, i] + 0.02:
-                self.logodds[j, i] = float(lo)
-                self.quality[j, i] = float(q)
+            incoming_lo = float(lo)
+            incoming_q = float(q)
+            incoming_mask = int(masks[k]) if k < len(masks) else src_bit
+            if src_bit:
+                incoming_mask |= src_bit
+            current_q = float(self.quality[j, i])
+            current_lo = float(self.logodds[j, i])
+            current_mask = int(self.source_mask[j, i])
+            if incoming_q <= 0.01:
+                continue
+            if current_q <= 0.01:
+                new_lo = incoming_lo
+                new_q = incoming_q
+            else:
+                same_sign = (current_lo >= 0 and incoming_lo >= 0) or (current_lo <= 0 and incoming_lo <= 0)
+                new_sources = incoming_mask & ~current_mask
+                if new_sources and same_sign:
+                    extra_sources = max(1, int(new_sources).bit_count())
+                    new_lo = clamp(current_lo + min(0.45, 0.22 * extra_sources) * incoming_lo, self.cfg.logodds_min, self.cfg.logodds_max)
+                    new_q = min(1.0, max(current_q, incoming_q) + 0.08 * extra_sources * incoming_q * (1.0 - current_q))
+                elif incoming_q > current_q + 0.05:
+                    alpha = min(0.75, incoming_q / max(current_q + incoming_q, 1e-6))
+                    new_lo = (1.0 - alpha) * current_lo + alpha * incoming_lo
+                    new_q = max(current_q * 0.995, incoming_q)
+                elif incoming_q >= current_q * 0.55:
+                    alpha = 0.35 * incoming_q / max(current_q + incoming_q, 1e-6)
+                    new_lo = (1.0 - alpha) * current_lo + alpha * incoming_lo
+                    new_q = max(current_q * 0.995, current_q if same_sign else min(current_q, incoming_q))
+                else:
+                    continue
+            if abs(new_lo - current_lo) > 1e-4 or abs(new_q - current_q) > 1e-4 or (incoming_mask & ~current_mask):
+                self.logodds[j, i] = clamp(float(new_lo), self.cfg.logodds_min, self.cfg.logodds_max)
+                self.quality[j, i] = float(new_q)
                 self.source[j, i] = src
-                self.last_seen[j, i] = t
+                self.source_mask[j, i] = current_mask | incoming_mask
+                self.last_seen[j, i] = max(float(self.last_seen[j, i]), t)
                 changed = True
         if changed:
             self._invalidate_cache()
@@ -358,4 +410,5 @@ class OccupancyGrid:
             "cells": cells,
             "logodds": [float(self.logodds[j, i]) for i, j in cells],
             "quality": [float(self.quality[j, i]) for i, j in cells],
+            "source_mask": [int(self.source_mask[j, i] | self._source_bit(robot_id)) for i, j in cells],
         }

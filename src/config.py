@@ -23,13 +23,17 @@ class RobotConfig:
     goal_commit_time_s: float = 7.0; goal_switch_score_margin: float = 2.0
     stuck_progress_timeout_s: float = 9.0; failed_goal_memory_size: int = 16
     visit_history_spacing_m: float = 0.75; max_visit_history: int = 220
+    true_path_spacing_m: float = 0.30; max_true_path_points: int = 450
     path_digest_spacing_m: float = 1.15; max_path_digest_points: int = 12
+    visit_digest_spacing_m: float = 1.8; max_visit_digest_points: int = 14
 
 @dataclass(frozen=True)
 class MotionNoiseConfig:
     xy_std_per_m: float = 0.035; theta_std_per_rad: float = 0.025
     process_xy: float = 0.018; process_theta: float = 0.014
     landmark_xy_gain: float = 0.55; landmark_cov_shrink: float = 0.55
+    landmark_range_std: float = 0.18; landmark_bearing_std_deg: float = 4.0
+    home_range_std: float = 0.06; home_bearing_std_deg: float = 1.2
 
 @dataclass(frozen=True)
 class LidarConfig:
@@ -64,7 +68,7 @@ class PlanningConfig:
 
 @dataclass(frozen=True)
 class CommunicationConfig:
-    radius: float = 6.0; packet_period_s: float = 0.5; teammate_intent_timeout_s: float = 8.0
+    radius: float = 8.0; packet_period_s: float = 0.5; teammate_intent_timeout_s: float = 8.0
 
 @dataclass(frozen=True)
 class CageConfig:
@@ -75,10 +79,12 @@ class CageConfig:
 
 @dataclass(frozen=True)
 class UIConfig:
-    interval_ms: int = 100; sim_steps_per_render: int = 4; selected_robot: int = 0
-    show_lidar_rays: bool = False; show_truth_target: bool = True; max_status_routes: int = 3
+    interval_ms: int = 180; sim_steps_per_render: int = 4; selected_robot: int = 0
+    show_lidar_rays: bool = False; show_route_graph: bool = False; show_truth_target: bool = True; max_status_routes: int = 3
     figure_width: float = 16.5; figure_height: float = 10.2
-    draw_lidar_stride: int = 3; max_draw_path_points: int = 450; max_draw_graph_edges: int = 260
+    draw_lidar_stride: int = 3; max_draw_path_points: int = 450; max_draw_graph_edges: int = 120; max_draw_graph_nodes: int = 180
+    max_draw_frontiers: int = 22; max_draw_teammate_visit_points: int = 16
+    render_truth_every: int = 3; render_team_every: int = 3; render_local_every: int = 6; render_frontier_every: int = 12
 
 @dataclass(frozen=True)
 class AppConfig:

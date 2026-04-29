@@ -82,8 +82,17 @@ class Simulator:
         routes = self.home_memory.graph.top_routes(k=max(1, self.cfg.cage.desired_route_count))
         good_routes = [r for r in routes if r.certificate >= self.cfg.cage.route_cert_threshold]
         self.home_memory.best_routes = routes
-        if home_target and good_routes:
-            self.mission = MissionStatus("COMPLETE", True, "HOME has target report and certified route")
+        returned = [
+            r.id
+            for r in self.robots
+            if self.world.home_base.contains((float(r.true_pose[0]), float(r.true_pose[1])))
+        ]
+        all_returned_home = len(returned) == len(self.robots)
+        returned_msg = f"{len(returned)}/{len(self.robots)} robots at HOME"
+        if home_target and good_routes and all_returned_home:
+            self.mission = MissionStatus("COMPLETE", True, "HOME has target report, certified route, and all robots returned")
+        elif home_target and good_routes:
+            self.mission = MissionStatus("RETURN_HOME", False, f"Certified route ready; returning team to HOME ({returned_msg})")
         elif home_target:
             self.mission = MissionStatus("CERTIFY_ROUTES", False, "HOME knows target; certifying route options")
         elif local_target:

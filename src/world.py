@@ -147,7 +147,7 @@ class World:
     def visible_landmarks(self, pose: Pose, max_range: float) -> list[Landmark]:
         p = (pose[0], pose[1])
         out: list[Landmark] = []
-        for lm in self.landmarks:
+        for lm in self.all_landmarks:
             if distance(p, lm.xy) <= max_range and self.segment_free(p, lm.xy, margin=0.02):
                 out.append(lm)
         return out
