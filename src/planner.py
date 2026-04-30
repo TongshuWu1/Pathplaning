@@ -18,12 +18,22 @@ class PlanResult:
 class GridPlanner:
     def __init__(self, cfg: PlanningConfig): self.cfg = cfg
 
-    def plan(self, grid: OccupancyGrid, start: Point, goal: Point) -> PlanResult:
+    def plan(
+        self,
+        grid: OccupancyGrid,
+        start: Point,
+        goal: Point,
+        passage_quality: np.ndarray | None = None,
+        dynamic_obstacles: list[tuple[Point, float]] | None = None,
+    ) -> PlanResult:
         start_cell, goal_cell = grid.world_to_cell(start), grid.world_to_cell(goal)
         if start_cell is None or goal_cell is None:
             return PlanResult([], False, math.inf, "start_or_goal_outside_map")
         traversable = grid.traversable_mask(self.cfg.inflation_radius_m)
         clearance = grid.clearance_map(max_radius_m=max(3.0, self.cfg.desired_clearance_m * 3.0))
+        dynamic_blocked, dynamic_cost = self._dynamic_obstacle_fields(grid, dynamic_obstacles)
+        if dynamic_blocked is not None:
+            traversable = traversable & ~dynamic_blocked
         goal_cell = self._nearest_good_cell(traversable, clearance, goal_cell) or goal_cell
         if not traversable[start_cell[1], start_cell[0]]:
             start_cell = self._nearest_good_cell(traversable, clearance, start_cell) or start_cell
@@ -53,12 +63,48 @@ class GridPlanner:
                 cl = float(clearance[nj,ni])
                 deficit = max(0.0, self.cfg.desired_clearance_m - cl) / max(1e-6, self.cfg.desired_clearance_m)
                 clearance_cost = self.cfg.clearance_cost_weight * deficit * deficit + (3.0 if cl < self.cfg.critical_clearance_m else 0.0)
-                new_g = g[cur] + step * grid.res * (1.0 + unknown_cost + occ_soft + clearance_cost)
+                passage_cost = 0.0
+                if passage_quality is not None:
+                    passage_score = float(np.clip(passage_quality[nj, ni], 0.0, 1.0))
+                    passage_cost = self.cfg.passage_safety_cost_weight * (1.0 - passage_score) ** 2
+                dynamic_penalty = float(dynamic_cost[nj, ni]) if dynamic_cost is not None else 0.0
+                new_g = g[cur] + step * grid.res * (1.0 + unknown_cost + occ_soft + clearance_cost + passage_cost + dynamic_penalty)
                 nb=(ni,nj)
                 if new_g < g.get(nb, math.inf):
                     came[nb]=cur; g[nb]=new_g; counter += 1
                     heapq.heappush(heap, (new_g + distance(grid.cell_to_world(nb), grid.cell_to_world(goal_cell)), counter, nb))
         return PlanResult([], False, math.inf, "a_star_failed")
+
+    def _dynamic_obstacle_fields(
+        self,
+        grid: OccupancyGrid,
+        dynamic_obstacles: list[tuple[Point, float]] | None,
+    ) -> tuple[np.ndarray | None, np.ndarray | None]:
+        if not dynamic_obstacles:
+            return None, None
+        blocked = np.zeros((grid.ny, grid.nx), dtype=bool)
+        cost = np.zeros((grid.ny, grid.nx), dtype=float)
+        soft = max(0.0, float(self.cfg.dynamic_obstacle_soft_margin_m))
+        for p, radius_m in dynamic_obstacles:
+            cell = grid.world_to_cell(p)
+            if cell is None:
+                continue
+            hard = max(0.0, float(radius_m))
+            total = hard + soft
+            radius_cells = max(1, int(math.ceil(total / grid.res)))
+            ci, cj = cell
+            y0, y1 = max(0, cj - radius_cells), min(grid.ny, cj + radius_cells + 1)
+            x0, x1 = max(0, ci - radius_cells), min(grid.nx, ci + radius_cells + 1)
+            for j in range(y0, y1):
+                for i in range(x0, x1):
+                    q = grid.cell_to_world((i, j))
+                    d = distance(p, q)
+                    if d <= hard:
+                        blocked[j, i] = True
+                    elif soft > 1e-9 and d <= total:
+                        t = (total - d) / soft
+                        cost[j, i] = max(cost[j, i], self.cfg.dynamic_obstacle_cost_weight * t * t)
+        return blocked, cost
 
     def _nearest_good_cell(self, traversable: np.ndarray, clearance: np.ndarray, cell: tuple[int,int], radius: int = 14) -> tuple[int,int] | None:
         ci,cj=cell; ny,nx=traversable.shape

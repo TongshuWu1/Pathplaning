@@ -46,6 +46,25 @@ python -m scripts.smoke_test
 - **Route graph**: show/hide route graph/certificate overlays.
 - **Reset**: rebuild the world using the Seed, Robots, Obstacles, and Landmarks boxes.
 
+
+## Current behavior notes
+
+- Each robot plans from its communication-limited knowledge map: its own LiDAR map plus received teammate map digests.
+- HOME builds the fused team belief map from HOME-connected robot self-map uploads.
+- Robot-to-robot communication shares intent, pose, path digest, visit digest, trajectory digest, target report, route evidence, and a bandwidth-limited knowledge-map digest.
+- EKF pose correction uses noisy fixed-landmark observations, LiDAR scan matching, and LOS teammate relative observations weighted by the teammate's reported pose uncertainty.
+- Robots are modeled as larger car-like bodies; the simulator prevents robot-robot overlap and local control slows/turns away from nearby teammates.
+- The **Passage quality** button affects only the HOME/Team Fused Belief panel.
+- LiDAR uses range-dependent hit noise, stable max-range freespace readings, kernelized map updates, and percentile sector clearances for less twitchy local safety decisions.
+- Target roundtrip reach is credited when a robot physically sees the target, not only when it touches the target region.
+- Passage quality is safety-first for future HOME-to-target execution paths: obstacle risk and clearance dominate, mapper confidence is only a soft reliability discount.
+- Passage quality uses a broad, adaptive clearance gradient so corridor/open-space centers are highest quality instead of all non-wall cells immediately turning green.
+- Passage quality colors are scaled over explored free cells only; unexplored cells remain visually separate from low-quality known passage.
+- Exploration frontier goals are chosen from scored candidates after checking planned path length, path clearance, unknown fraction, expected LiDAR-visible unknown area, LiDAR alignment, teammate reservations, current teammate paths, and teammate mapped-history likelihood.
+- Robots use goal-ownership hysteresis: once a frontier target is committed, they keep it longer, finish it when close, and only switch to a clearly better candidate unless blocked or stalled.
+- Exploration now uses same-step reservations and sector-biased frontier approaches to reduce robot clustering.
+- When exploration appears complete from team-known coverage and low remaining frontier count, robots switch to return-home behavior.
+
 ## Main modules
 
 ```text

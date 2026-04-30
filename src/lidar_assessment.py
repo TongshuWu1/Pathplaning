@@ -25,12 +25,12 @@ class LidarAssessment:
     decision_note: str = "init"
 
 
-def _sector_min(scan: LidarScan, center: float, half_width: float, fallback: float) -> float:
+def _sector_clearance(scan: LidarScan, center: float, half_width: float, fallback: float, percentile: float) -> float:
     delta = np.angle(np.exp(1j * (scan.angles - center)))
     m = np.abs(delta) <= half_width
     if not np.any(m):
         return fallback
-    return float(np.min(scan.ranges[m]))
+    return float(np.percentile(scan.ranges[m], percentile))
 
 
 def assess_lidar(
@@ -62,12 +62,13 @@ def assess_lidar(
 
     front_half = math.radians(lidar_cfg.front_angle_deg)
     side_half = math.radians(lidar_cfg.side_angle_deg * 0.5)
-    front = _sector_min(scan, 0.0, front_half, lidar_cfg.range)
-    left = _sector_min(scan, math.pi / 2.0, side_half, lidar_cfg.range)
-    right = _sector_min(scan, -math.pi / 2.0, side_half, lidar_cfg.range)
+    sector_pct = float(assess_cfg.sector_clearance_percentile)
+    front = _sector_clearance(scan, 0.0, front_half, lidar_cfg.range, sector_pct)
+    left = _sector_clearance(scan, math.pi / 2.0, side_half, lidar_cfg.range, sector_pct)
+    right = _sector_clearance(scan, -math.pi / 2.0, side_half, lidar_cfg.range, sector_pct)
     blocked = front <= lidar_cfg.blocked_forward_distance
 
-    open_mask = scan.ranges > max(lidar_cfg.range * 0.58, lidar_cfg.blocked_forward_distance * 2.0)
+    open_mask = scan.ranges > max(lidar_cfg.range * assess_cfg.open_sector_range_fraction, lidar_cfg.blocked_forward_distance * 2.0)
     min_width = max(1, int(round(math.radians(lidar_cfg.open_sector_min_width_deg) / (2 * math.pi) * len(scan.angles))))
     sectors: list[tuple[int, int]] = []
     n = len(open_mask)
@@ -86,8 +87,23 @@ def assess_lidar(
         if len(idxs) >= min_width:
             sectors.append((idxs[0], idxs[-1]))
     if sectors:
-        best = max(sectors, key=lambda ab: (ab[1] - ab[0]) % n)
-        mid = (best[0] + ((best[1] - best[0]) % n) / 2.0) % n
+        def sector_score(ab: tuple[int, int]) -> float:
+            start, end = ab
+            width = ((end - start) % n) + 1
+            idx = [(start + o) % n for o in range(width)]
+            mid = (start + (width - 1) / 2.0) % n
+            mid_angle = float(scan.angles[int(mid) % n])
+            depth = float(np.percentile(scan.ranges[idx], assess_cfg.open_sector_depth_percentile))
+            forward = math.cos(mid_angle)
+            return (
+                assess_cfg.open_sector_width_weight * (width / max(1, n))
+                + assess_cfg.open_sector_depth_weight * (depth / max(1e-6, lidar_cfg.range))
+                + assess_cfg.open_sector_forward_weight * forward
+            )
+
+        best = max(sectors, key=sector_score)
+        width = ((best[1] - best[0]) % n) + 1
+        mid = (best[0] + (width - 1) / 2.0) % n
         best_open_angle = float(scan.angles[int(mid) % n])
     else:
         best_open_angle = 0.0

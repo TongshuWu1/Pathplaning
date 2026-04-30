@@ -19,7 +19,7 @@ from math import ceil
 
 import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation
-from matplotlib.patches import Rectangle
+from matplotlib.patches import Polygon, Rectangle
 from matplotlib.widgets import Button, TextBox
 import numpy as np
 
@@ -35,8 +35,9 @@ class MatplotlibDashboard:
         self.sim = sim
         self.selected_robot = min(sim.cfg.ui.selected_robot, len(sim.robots) - 1)
         self.show_rays = bool(sim.cfg.ui.show_lidar_rays)
-        self.show_fused_quality = False
+        self.show_passage_quality = bool(sim.cfg.passage_quality.show_by_default)
         self.show_route_graph = bool(sim.cfg.ui.show_route_graph)
+        self.show_team_paths = True
         self.controls: dict[str, object] = {}
         self.local_axes = []
         self._render_frame = 0
@@ -120,8 +121,9 @@ class MatplotlibDashboard:
         self.controls["start"] = add_button(0.058, "Start", self._on_start)
         self.controls["pause"] = add_button(0.058, "Pause", self._on_pause)
         self.controls["rays"] = add_button(0.058, "Rays", self._on_toggle_rays)
-        self.controls["quality"] = add_button(0.070, "Quality", self._on_toggle_fused_quality)
+        self.controls["quality"] = add_button(0.108, "Passage quality", self._on_toggle_passage_quality)
         self.controls["graph"] = add_button(0.060, "Graph", self._on_toggle_route_graph)
+        self.controls["team_paths"] = add_button(0.078, "Team paths", self._on_toggle_team_paths)
         self.controls["reset"] = add_button(0.060, "Reset", self._on_reset)
         self.controls["seed"] = add_labeled_box(0.07, "Seed", str(self.sim.cfg.world.seed))
         self.controls["robots"] = add_labeled_box(0.06, "Robots", str(self.sim.cfg.robot.count))
@@ -165,12 +167,16 @@ class MatplotlibDashboard:
         self.show_rays = not self.show_rays
         self._redraw_all(force=True)
 
-    def _on_toggle_fused_quality(self, _event) -> None:
-        self.show_fused_quality = not self.show_fused_quality
+    def _on_toggle_passage_quality(self, _event) -> None:
+        self.show_passage_quality = not self.show_passage_quality
         self._redraw_all(force=True)
 
     def _on_toggle_route_graph(self, _event) -> None:
         self.show_route_graph = not self.show_route_graph
+        self._redraw_all(force=True)
+
+    def _on_toggle_team_paths(self, _event) -> None:
+        self.show_team_paths = not self.show_team_paths
         self._redraw_all(force=True)
 
     def _textbox_value(self, key: str, default: int) -> int:
@@ -239,6 +245,10 @@ class MatplotlibDashboard:
         names = {
             "SEARCH_FRONTIER": "FRONTIER",
             "SEARCH_OPEN_SECTOR": "OPEN",
+            "GO_TO_TARGET": "TARGET",
+            "EXPLORE_TOWARD_TARGET": "T-EXPLORE",
+            "RETURN_HOME_AFTER_TARGET": "T-RETURN",
+            "WAIT_AT_HOME_DONE": "DONE",
             "ADVANCE_TO_TARGET": "TARGET",
             "CERTIFY_TARGET_EDGE": "CERTIFY",
             "REPORT_TARGET_HOME": "REPORT",
@@ -300,10 +310,10 @@ class MatplotlibDashboard:
                 px = [r.est_xy[0]] + [p[0] for p in r.path[r.path_index:]]
                 py = [r.est_xy[1]] + [p[1] for p in r.path[r.path_index:]]
                 ax.plot(px, py, color=color, linewidth=0.9, linestyle="--", alpha=0.42, zorder=5)
-            x, y, _ = r.true_pose
-            ex, ey, _ = r.est_pose
-            ax.scatter([x], [y], s=54, c=[color], edgecolors="#111827", linewidths=0.55, zorder=7)
-            ax.scatter([ex], [ey], s=48, marker="o", facecolors="none", edgecolors=[color], linewidths=1.25, zorder=8)
+            x, y, th_true = r.true_pose
+            ex, ey, th_est = r.est_pose
+            self._draw_robot_body(ax, float(x), float(y), float(th_true), color, filled=True, zorder=7)
+            self._draw_robot_body(ax, float(ex), float(ey), float(th_est), color, filled=False, zorder=8)
             ax.plot([x, ex], [y, ey], color=color, linewidth=0.75, linestyle=":", alpha=0.45, zorder=6)
             if self.show_rays and r.scan is not None:
                 stride = max(self.sim.cfg.ui.draw_lidar_stride, len(r.scan.angles) // 24)
@@ -314,27 +324,72 @@ class MatplotlibDashboard:
                     ax.plot([x, x2], [y, y2], color=color, alpha=0.08, linewidth=0.45, zorder=3)
         self._draw_comm_links(ax)
 
+    def _draw_robot_body(self, ax, x: float, y: float, theta: float, color: str, filled: bool, zorder: int) -> None:
+        length = float(self.sim.cfg.robot.body_length)
+        width = float(self.sim.cfg.robot.body_width)
+        c, s = math.cos(theta), math.sin(theta)
+        forward = np.array([c, s])
+        side = np.array([-s, c])
+        center = np.array([x, y])
+        corners = [
+            center + forward * (length * 0.5) + side * (width * 0.5),
+            center + forward * (length * 0.5) - side * (width * 0.5),
+            center - forward * (length * 0.5) - side * (width * 0.5),
+            center - forward * (length * 0.5) + side * (width * 0.5),
+        ]
+        patch = Polygon(
+            corners,
+            closed=True,
+            facecolor=color if filled else "none",
+            edgecolor="#111827" if filled else color,
+            linewidth=0.75 if filled else 1.25,
+            alpha=0.88 if filled else 0.95,
+            zorder=zorder,
+        )
+        ax.add_patch(patch)
+        nose = center + forward * (length * 0.55)
+        ax.plot([x, float(nose[0])], [y, float(nose[1])], color="#111827" if filled else color, linewidth=0.8, alpha=0.8, zorder=zorder + 1)
+
     def _draw_comm_links(self, ax) -> None:
         for a, b in self.sim.comm_state.robot_segments:
             ax.plot([a[0], b[0]], [a[1], b[1]], linestyle="--", color="#0284c7", linewidth=1.35, alpha=0.70, zorder=9)
         for a, b in self.sim.comm_state.home_segments:
             ax.plot([a[0], b[0]], [a[1], b[1]], linestyle=":", color="#16a34a", linewidth=1.55, alpha=0.75, zorder=9)
 
-    def _draw_grid(self, ax, grid: OccupancyGrid, title: str, ticks: bool = True) -> None:
+    def _draw_grid(self, ax, grid: OccupancyGrid, title: str, ticks: bool = True, quality_overlay: bool = False) -> None:
         self._setup_map_axis(ax, title, ticks=ticks)
         ax.imshow(
-            self._belief_image(grid),
+            self._belief_image(grid, shade_quality=False),
             origin="lower",
             extent=(0, grid.width_m, 0, grid.height_m),
             interpolation="nearest",
             zorder=0,
         )
-        if self.show_fused_quality:
-            q = np.clip(grid.quality, 0.0, 1.0)
+        if quality_overlay:
+            q = grid.passage_quality(self.sim.cfg.passage_quality, robot_radius_m=self.sim.cfg.robot.radius)
+            overlay_mask = (
+                grid.known_mask()
+                & grid.free_mask()
+                & np.isfinite(q)
+            )
+            q = self._masked_neighbor_mean(q, overlay_mask)
+            finite = overlay_mask & np.isfinite(q)
+            if np.any(finite):
+                q_min = float(np.percentile(q[finite], 5.0))
+                q_max = float(np.percentile(q[finite], 98.0))
+                if q_max > q_min + 1e-9:
+                    scaled = np.clip((q - q_min) / (q_max - q_min), 0.0, 1.0)
+                else:
+                    scaled = np.full_like(q, 0.5, dtype=float)
+            else:
+                scaled = np.full_like(q, 0.5, dtype=float)
             overlay = np.zeros((grid.ny, grid.nx, 4), dtype=float)
-            overlay[..., 1] = q
-            overlay[..., 0] = 1.0 - q
-            overlay[..., 3] = 0.25 * (q > 0.05)
+            # Normalize the current passage scores into a red-yellow-green ramp:
+            # lowest explored/free score is red, highest is green. Unexplored
+            # cells stay as the base unknown color instead of dominating the ramp.
+            overlay[..., 0] = np.where(scaled < 0.5, 1.0, 2.0 * (1.0 - scaled))
+            overlay[..., 1] = np.where(scaled < 0.5, 2.0 * scaled, 1.0)
+            overlay[..., 3] = float(self.sim.cfg.passage_quality.overlay_alpha) * finite
             ax.imshow(
                 overlay,
                 origin="lower",
@@ -343,9 +398,26 @@ class MatplotlibDashboard:
                 zorder=1,
             )
 
-    def _belief_image(self, grid: OccupancyGrid) -> np.ndarray:
+    def _masked_neighbor_mean(self, values: np.ndarray, mask: np.ndarray) -> np.ndarray:
+        out = np.array(values, dtype=float, copy=True)
+        total = np.zeros_like(out)
+        count = np.zeros_like(out)
+        for dy in (-1, 0, 1):
+            ys = slice(max(0, -dy), min(out.shape[0], out.shape[0] - dy))
+            yd = slice(max(0, dy), min(out.shape[0], out.shape[0] + dy))
+            for dx in (-1, 0, 1):
+                xs = slice(max(0, -dx), min(out.shape[1], out.shape[1] - dx))
+                xd = slice(max(0, dx), min(out.shape[1], out.shape[1] + dx))
+                valid = mask[ys, xs]
+                total[yd, xd] += np.where(valid, values[ys, xs], 0.0)
+                count[yd, xd] += valid.astype(float)
+        m = mask & (count > 0.0)
+        out[m] = total[m] / count[m]
+        return out
+
+    def _belief_image(self, grid: OccupancyGrid, shade_quality: bool = False) -> np.ndarray:
         version = int(getattr(grid, "_version", 0))
-        cache_key = id(grid)
+        cache_key = (id(grid), bool(shade_quality))
         cached = self._belief_cache.get(cache_key)
         if cached is not None and cached[0] == version:
             return cached[1]
@@ -361,8 +433,12 @@ class MatplotlibDashboard:
         occ_color = np.array([0.08, 0.10, 0.12])
         img[free] = free_color
         img[occ] = occ_color
-        low_q = observed & (quality < 0.45)
-        img[low_q] = 0.65 * img[low_q] + 0.35 * np.array([0.74, 0.79, 0.86])
+        # Quality is intentionally NOT baked into normal occupancy colors.
+        # The red/green confidence layer appears only when the HOME fused map
+        # calls _draw_grid(..., quality_overlay=True).
+        if shade_quality:
+            low_q = observed & (quality < 0.45)
+            img[low_q] = 0.65 * img[low_q] + 0.35 * np.array([0.74, 0.79, 0.86])
         self._belief_cache[cache_key] = (version, img)
         return img
 
@@ -390,9 +466,9 @@ class MatplotlibDashboard:
 
     def _draw_team_belief(self) -> None:
         title = "HOME Fused Belief"
-        if self.show_fused_quality:
-            title += " + Quality"
-        self._draw_grid(self.ax_team, self.sim.home_memory.map, title)
+        if self.show_passage_quality:
+            title += " + Passage quality"
+        self._draw_grid(self.ax_team, self.sim.home_memory.map, title, quality_overlay=self.show_passage_quality)
         self._draw_home_base(self.ax_team)
         self._draw_frontiers(self.ax_team, self.sim.home_memory.map, size=14, alpha=0.58)
         hx, hy = self.sim.world.home
@@ -438,10 +514,12 @@ class MatplotlibDashboard:
                 continue
             color = self._robot_color(robot.id)
             known_intents = len(robot.known_teammate_goals)
-            title = f"R{robot.id} Local  {self._short_task(robot.current_task)}  S {robot.assessment.consistency:.2f}  F {robot.assessment.front_clearance:.1f}m  I {known_intents}"
+            title = f"R{robot.id} Knowledge  {self._short_task(robot.current_task)}  S {robot.assessment.consistency:.2f}  F {robot.assessment.front_clearance:.1f}m  I {known_intents}"
             self._draw_grid(ax, robot.map, title, ticks=False)
             self._draw_home_base(ax)
             self._draw_frontiers(ax, robot.map, size=8, alpha=0.48)
+            if self.show_team_paths:
+                self._draw_known_trajectories(ax, robot)
             self._draw_teammate_context(ax, robot)
             hx, hy = self.sim.world.home
             ax.scatter([hx], [hy], marker="P", s=28, c="#22c55e", edgecolors="#111827", linewidths=0.4, zorder=3)
@@ -470,6 +548,41 @@ class MatplotlibDashboard:
                     y2 = ey + math.sin(eth + float(a)) * float(rng)
                     ax.plot([ex, x2], [ey, y2], color=color, alpha=0.08, linewidth=0.38, zorder=5)
             self._local_drawn.add(robot.id)
+
+
+    def _draw_known_trajectories(self, ax, robot) -> None:
+        max_pts = max(8, int(self.sim.cfg.ui.max_draw_teammate_trajectory_points))
+        own = list(getattr(robot, "trajectory_from_home", []))[-max_pts:]
+        own_color = self._robot_color(robot.id)
+        if len(own) >= 2:
+            ax.plot(
+                [p[0] for p in own],
+                [p[1] for p in own],
+                color=own_color,
+                linewidth=1.15,
+                linestyle="-",
+                alpha=0.58,
+                zorder=5,
+            )
+        for rid, path in getattr(robot, "known_teammate_trajectories", {}).items():
+            if rid == robot.id or len(path) < 2:
+                continue
+            pts = list(path)[-max_pts:]
+            color = self._robot_color(rid)
+            stamp = getattr(robot, "known_teammate_trajectory_time", {}).get(rid, -math.inf)
+            age = max(0.0, self.sim.time_s - stamp)
+            fresh_window = max(1.0, self.sim.cfg.communication.teammate_intent_timeout_s * 2.0)
+            alpha = max(0.16, min(0.46, 0.46 * (1.0 - min(0.75, age / fresh_window))))
+            ax.plot(
+                [p[0] for p in pts],
+                [p[1] for p in pts],
+                color=color,
+                linewidth=0.95,
+                linestyle="--",
+                alpha=alpha,
+                zorder=5,
+            )
+            ax.scatter([pts[-1][0]], [pts[-1][1]], marker=".", s=18, c=[color], alpha=max(alpha, 0.24), linewidths=0, zorder=6)
 
     def _draw_teammate_context(self, ax, robot) -> None:
         for rid, pts in robot.known_teammate_visits.items():
@@ -597,14 +710,19 @@ class MatplotlibDashboard:
         rb = sel.status.reward_breakdown
         home_connected = [rid for rid, ok in sorted(self.sim.comm_state.home_connected.items()) if ok]
         intent_counts = "  ".join(f"R{r.id}:{len(r.known_teammate_goals)}" for r in self.sim.robots)
+        reached = [r.id for r in self.sim.robots if getattr(r, "target_reached", False)]
+        completed = [r.id for r in self.sim.robots if getattr(r, "completed_target_roundtrip", False)]
+        required = self.sim._required_roundtrip_count() if hasattr(self.sim, "_required_roundtrip_count") else len(self.sim.robots)
 
         left_lines = [
             f"{status}  t={self.sim.time_s:5.1f}s  step={self.sim.step_count}",
             f"Phase   {self.sim.mission.phase}",
             f"Target  HOME {'yes' if home_target.detected else 'no'}   local {local or '-'}",
+            f"Passage score {self.sim.passage_status.score:.2f}   clear {self.sim.passage_status.min_clearance:.2f} m   unk {self.sim.passage_status.unknown_fraction:.2f}",
+            f"Target  reached {reached or '-'}   done {len(completed)}/{required} {completed or '-'}",
             f"Return  {len(returned)}/{len(self.sim.robots)} at HOME   ids {returned or '-'}",
             f"LOS     robot {len(self.sim.comm_state.direct_robot_edges)}   home {home_connected or '-'}",
-            f"View    rays {'on' if self.show_rays else 'off'}   quality {'on' if self.show_fused_quality else 'off'}   graph {'on' if self.show_route_graph else 'off'}",
+            f"View    rays {'on' if self.show_rays else 'off'}   passage quality {'on' if self.show_passage_quality else 'off'}   team paths {'on' if self.show_team_paths else 'off'}   graph {'on' if self.show_route_graph else 'off'}",
         ]
         right_lines = [
             f"Selected R{sel.id}  {self._short_task(sel.current_task)}",
@@ -622,12 +740,20 @@ class MatplotlibDashboard:
         ax.plot([0.025, 0.975], [0.37, 0.37], transform=ax.transAxes, color="#e2e8f0", linewidth=0.8)
 
         routes = self.sim.home_memory.best_routes[: self.sim.cfg.ui.max_status_routes]
-        route_lines = ["Routes"]
+        route_lines = ["Routes / target roundtrips"]
         if routes:
             for i, route in enumerate(routes):
                 route_lines.append(
                     f"#{i}  len {route.length:5.1f} m   clear {route.min_clearance:.2f}   cert {route.certificate:.2f}   {route.status}"
                 )
         else:
-            route_lines.append("none yet")
+            route_lines.append("graph routes: none yet")
+        candidates = getattr(self.sim.home_memory, "route_candidates", {})
+        if candidates:
+            for rid, cand in sorted(candidates.items())[: self.sim.cfg.ui.max_status_routes]:
+                done = "done" if cand.get("roundtrip_complete") else "reached"
+                route_lines.append(
+                    f"R{rid} {done} len {cand.get('route_length', 0.0):4.1f}+{cand.get('return_length', 0.0):4.1f} m "
+                    f"q {cand.get('mean_quality', 0.0):.2f} clr {cand.get('min_clearance', 0.0):.2f}"
+                )
         ax.text(0.025, 0.30, "\n".join(route_lines), transform=ax.transAxes, va="top", ha="left", fontsize=8.2, family="monospace", color="#111827")

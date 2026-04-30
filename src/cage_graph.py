@@ -281,28 +281,57 @@ class RouteGraph:
         cache_key = (self._version, k, require_target, self.home_id, self.target_id)
         if self._route_cache_key == cache_key:
             return list(self._route_cache)
-        if self.home_id is None or self.target_id is None:
+        if self.home_id is None or self.home_id not in self.nodes:
             return []
-        if self.home_id not in self.nodes or self.target_id not in self.nodes:
+        if require_target and (self.target_id is None or self.target_id not in self.nodes):
             return []
-        # Dijkstra-style best route search. The route graph can be a long chain,
-        # so a small simple-path depth cap will miss valid H->target routes.
+
+        # Multi-route best-first search.  Unlike the old version, this keeps
+        # searching after the first HOME->TARGET path and returns up to k
+        # distinct route candidates.  For graph digests before a target exists,
+        # require_target=False returns high-confidence exploratory paths from
+        # HOME so useful graph evidence is still shared.
+        target_id = self.target_id if self.target_id in self.nodes else None
         pq: list[tuple[float, int, int, list[int], list[int], float, float, float, bool]] = []
         counter = 0
         heapq.heappush(pq, (0.0, counter, self.home_id, [self.home_id], [], 0.0, math.inf, 1.0, True))
-        best_score: dict[int, float] = {self.home_id: 0.0}
-        while pq and counter < max(2000, len(self.edges) * 40):
+        routes: list[RouteCandidate] = []
+        seen_routes: set[tuple[int, ...]] = set()
+        best_scores: dict[int, list[float]] = {self.home_id: [0.0]}
+        max_keep_per_node = max(2, min(6, k + 2))
+        max_iter = max(3000, len(self.edges) * 60)
+
+        while pq and counter < max_iter and len(routes) < max(1, k):
             score, _, cur, path_nodes, path_edges, length, min_clearance, cert, reported = heapq.heappop(pq)
-            if score > best_score.get(cur, math.inf) + 1e-9:
-                continue
-            if cur == self.target_id:
-                status = "certified" if cert >= 0.62 else "candidate"
-                if not reported:
-                    status += "/needs_report"
-                routes = [RouteCandidate(path_nodes, path_edges, length, min_clearance if math.isfinite(min_clearance) else 0.0, cert, reported, status)]
-                self._route_cache_key = cache_key
-                self._route_cache = routes
-                return list(routes)
+            reached_target = target_id is not None and cur == target_id and path_edges
+            exploratory_route = (not require_target) and cur != self.home_id and path_edges
+            if reached_target or exploratory_route:
+                sig = tuple(path_nodes)
+                if sig not in seen_routes:
+                    seen_routes.add(sig)
+                    if reached_target:
+                        status = "certified" if cert >= 0.62 else "candidate"
+                        if not reported:
+                            status += "/needs_report"
+                    else:
+                        status = "exploratory"
+                    routes.append(RouteCandidate(
+                        list(path_nodes),
+                        list(path_edges),
+                        float(length),
+                        float(min_clearance if math.isfinite(min_clearance) else 0.0),
+                        float(cert),
+                        bool(reported),
+                        status,
+                    ))
+                    if reached_target and len(routes) >= k:
+                        break
+                # For exploratory digests, keep expanding to find longer/high
+                # confidence alternatives.  For target routes, do not expand
+                # through the target node.
+                if reached_target:
+                    continue
+
             for nb, eid in self._adj.get(cur, {}).items():
                 if nb in path_nodes:
                     continue
@@ -311,16 +340,30 @@ class RouteGraph:
                 new_min_clearance = min(min_clearance, edge.cert.min_clearance)
                 new_cert = min(cert, edge.cert.confidence)
                 new_reported = reported and edge.cert.reported_home
-                # Prefer high confidence and short paths.
                 new_score = new_length / max(new_cert, 0.05) + 3.0 * max(0.0, 0.65 - new_cert)
-                if new_score >= best_score.get(nb, math.inf):
+                kept = best_scores.setdefault(nb, [])
+                if len(kept) >= max_keep_per_node and new_score >= max(kept):
                     continue
-                best_score[nb] = new_score
+                kept.append(new_score)
+                kept.sort()
+                del kept[max_keep_per_node:]
                 counter += 1
-                heapq.heappush(pq, (new_score, counter, nb, path_nodes + [nb], path_edges + [eid], new_length, new_min_clearance, new_cert, new_reported))
+                heapq.heappush(pq, (
+                    new_score,
+                    counter,
+                    nb,
+                    path_nodes + [nb],
+                    path_edges + [eid],
+                    new_length,
+                    new_min_clearance,
+                    new_cert,
+                    new_reported,
+                ))
+
+        routes.sort(key=lambda r: (r.length / max(r.certificate, 0.05), -r.certificate))
         self._route_cache_key = cache_key
-        self._route_cache = []
-        return []
+        self._route_cache = routes[:max(1, k)]
+        return list(self._route_cache)
 
     def route_points(self, route: RouteCandidate) -> list[Point]:
         return [self.nodes[n].xy for n in route.node_ids if n in self.nodes]

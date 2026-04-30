@@ -12,7 +12,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from .config import MappingConfig
+from .config import MappingConfig, PassageQualityConfig
 from .geometry import Point, Pose, clamp, distance
 from .sensors import LidarScan
 
@@ -123,6 +123,12 @@ class OccupancyGrid:
     def traversable_mask(self, inflation_m: float) -> np.ndarray:
         occ = self.occupied_mask()
         inflated = self.inflate_mask(occ, inflation_m)
+        margin = int(math.ceil(max(0.0, inflation_m) / self.res))
+        if margin > 0:
+            inflated[:margin, :] = True
+            inflated[-margin:, :] = True
+            inflated[:, :margin] = True
+            inflated[:, -margin:] = True
         # Unknown remains traversable but costly for exploration; occupied/inflated is not.
         return ~inflated
 
@@ -164,26 +170,49 @@ class OccupancyGrid:
                 y += sy
         return cells
 
-    def _write_cell(self, cell: tuple[int, int], delta: float, obs_quality: float, robot_id: int, time_s: float) -> None:
+    def _write_cell(self, cell: tuple[int, int], delta: float, obs_quality: float, robot_id: int, time_s: float, weight: float = 1.0) -> None:
         i, j = cell
         if not (0 <= i < self.nx and 0 <= j < self.ny):
             return
+        w = min(1.0, max(0.0, float(weight)))
+        if w <= 0.0:
+            return
+        weighted_quality = min(1.0, max(0.0, float(obs_quality) * w))
         current_q = self.quality[j, i]
         # Higher-quality observations dominate. Lower-quality observations are
         # allowed to nudge, but not overwrite aggressively.
-        if obs_quality + self.cfg.quality_overwrite_margin >= current_q:
+        if weighted_quality + self.cfg.quality_overwrite_margin >= current_q:
             scale = 1.0
         else:
-            scale = self.cfg.low_quality_update_scale * max(0.05, obs_quality / max(current_q, 1e-6))
+            scale = self.cfg.low_quality_update_scale * max(0.05, weighted_quality / max(current_q, 1e-6))
         self.logodds[j, i] = clamp(
-            float(self.logodds[j, i] + delta * obs_quality * scale),
+            float(self.logodds[j, i] + delta * weighted_quality * scale),
             self.cfg.logodds_min,
             self.cfg.logodds_max,
         )
-        self.quality[j, i] = max(current_q * 0.995, obs_quality)
+        self.quality[j, i] = max(current_q * 0.995, weighted_quality)
         self.last_seen[j, i] = time_s
         self.source[j, i] = robot_id
         self.source_mask[j, i] |= self._source_bit(robot_id)
+
+    def _write_cell_kernel(self, cell: tuple[int, int], delta: float, obs_quality: float, robot_id: int, time_s: float, radius_m: float) -> None:
+        radius = max(0.0, float(radius_m))
+        if radius <= 1e-9:
+            self._write_cell(cell, delta, obs_quality, robot_id, time_s)
+            return
+        ci, cj = cell
+        radius_cells = max(0, int(math.ceil(radius / self.res)))
+        sigma = max(self.res * 0.5, radius * 0.62)
+        min_weight = min(1.0, max(0.0, float(self.cfg.lidar_kernel_min_weight)))
+        for dj in range(-radius_cells, radius_cells + 1):
+            for di in range(-radius_cells, radius_cells + 1):
+                dist_m = math.hypot(di * self.res, dj * self.res)
+                if dist_m > radius + 1e-9:
+                    continue
+                weight = math.exp(-0.5 * (dist_m / sigma) ** 2)
+                if dist_m > 0.0:
+                    weight = max(min_weight, weight)
+                self._write_cell((ci + di, cj + dj), delta, obs_quality, robot_id, time_s, weight=weight)
 
     def update_from_lidar(self, est_pose: Pose, scan: LidarScan, pose_quality: float, robot_id: int, time_s: float) -> None:
         start = self.world_to_cell((est_pose[0], est_pose[1]))
@@ -206,10 +235,10 @@ class OccupancyGrid:
                 continue
             free_cells = ray_cells[:-1] if hit else ray_cells
             for c in free_cells:
-                self._write_cell(c, self.cfg.logodds_free, pose_quality, robot_id, time_s)
+                self._write_cell_kernel(c, self.cfg.logodds_free, pose_quality, robot_id, time_s, self.cfg.lidar_free_kernel_radius_m)
                 wrote = True
             if hit:
-                self._write_cell(ray_cells[-1], self.cfg.logodds_occ, pose_quality, robot_id, time_s)
+                self._write_cell_kernel(ray_cells[-1], self.cfg.logodds_occ, pose_quality, robot_id, time_s, self.cfg.lidar_hit_kernel_radius_m)
                 wrote = True
         if wrote:
             self._invalidate_cache()
@@ -342,7 +371,14 @@ class OccupancyGrid:
         return min(self.segment_min_clearance(a, b, max_radius_m) for a, b in zip(path[:-1], path[1:]))
 
     def merge_from_digest(self, digest: dict, combine_sources: bool = False) -> None:
-        # Lightweight packet fusion: combine observations from independent robots.
+        """Merge a received map digest by highest confidence, not newest time.
+
+        This method is used for robot knowledge-map fusion and HOME fused-map
+        fusion. A newer packet from a poorly localized robot should not
+        overwrite an older, more reliable cell. The incoming cell replaces the
+        existing cell only when its stored mapping quality is higher by a small
+        margin, or when the cell was previously unknown.
+        """
         idx = digest.get("cells", [])
         vals = digest.get("logodds", [])
         quals = digest.get("quality", [])
@@ -351,56 +387,110 @@ class OccupancyGrid:
         t = float(digest.get("time_s", 0.0))
         changed = False
         src_bit = self._source_bit(src)
+        margin = float(getattr(self.cfg, "merge_quality_margin", 0.03))
         for k, ((i, j), lo, q) in enumerate(zip(idx, vals, quals)):
             if not (0 <= i < self.nx and 0 <= j < self.ny):
                 continue
-            incoming_lo = float(lo)
-            incoming_q = float(q)
+            incoming_lo = clamp(float(lo), self.cfg.logodds_min, self.cfg.logodds_max)
+            incoming_q = min(1.0, max(0.0, float(q)))
+            if incoming_q <= 0.01:
+                continue
             incoming_mask = int(masks[k]) if k < len(masks) else src_bit
             if src_bit:
                 incoming_mask |= src_bit
             current_q = float(self.quality[j, i])
-            current_lo = float(self.logodds[j, i])
             current_mask = int(self.source_mask[j, i])
-            if incoming_q <= 0.01:
-                continue
-            if current_q <= 0.01:
-                new_lo = incoming_lo
-                new_q = incoming_q
-            else:
-                same_sign = (current_lo >= 0 and incoming_lo >= 0) or (current_lo <= 0 and incoming_lo <= 0)
-                new_sources = incoming_mask & ~current_mask
-                if combine_sources and new_sources and same_sign:
-                    extra_sources = max(1, int(new_sources).bit_count())
-                    new_lo = clamp(current_lo + min(0.45, 0.22 * extra_sources) * incoming_lo, self.cfg.logodds_min, self.cfg.logodds_max)
-                    new_q = min(1.0, max(current_q, incoming_q) + 0.08 * extra_sources * incoming_q * (1.0 - current_q))
-                elif incoming_q > current_q + 0.05:
-                    alpha = min(0.75, incoming_q / max(current_q + incoming_q, 1e-6))
-                    new_lo = (1.0 - alpha) * current_lo + alpha * incoming_lo
-                    new_q = max(current_q * 0.995, incoming_q)
-                elif incoming_q >= current_q * 0.55:
-                    alpha = 0.35 * incoming_q / max(current_q + incoming_q, 1e-6)
-                    new_lo = (1.0 - alpha) * current_lo + alpha * incoming_lo
-                    new_q = max(current_q * 0.995, current_q if same_sign else min(current_q, incoming_q))
-                else:
-                    continue
-            if abs(new_lo - current_lo) > 1e-4 or abs(new_q - current_q) > 1e-4 or (incoming_mask & ~current_mask):
-                self.logodds[j, i] = clamp(float(new_lo), self.cfg.logodds_min, self.cfg.logodds_max)
-                self.quality[j, i] = float(new_q)
+
+            accept = current_q <= 0.01 or incoming_q > current_q + margin
+            if accept:
+                self.logodds[j, i] = incoming_lo
+                self.quality[j, i] = incoming_q
                 self.source[j, i] = src
+                self.source_mask[j, i] = current_mask | incoming_mask
+                self.last_seen[j, i] = max(float(self.last_seen[j, i]), t)
+                changed = True
+            elif incoming_mask & ~current_mask:
+                # Preserve provenance without changing the best-confidence cell.
                 self.source_mask[j, i] = current_mask | incoming_mask
                 self.last_seen[j, i] = max(float(self.last_seen[j, i]), t)
                 changed = True
         if changed:
             self._invalidate_cache()
 
-    def make_digest(self, robot_id: int, time_s: float, max_cells: int = 650) -> dict:
+    def passage_quality(
+        self,
+        cfg: PassageQualityConfig,
+        robot_radius_m: float = 0.0,
+        max_radius_m: float | None = None,
+    ) -> np.ndarray:
+        """Return per-cell execution/traversal passage score in [0, 1].
+
+        Passage quality answers: if a later execution robot uses this map to
+        drive from HOME to target, how good is this cell for the route?
+
+            occupancy safety × obstacle clearance × soft reliability discount
+
+        Clearance and obstacle risk dominate. Mapping confidence only discounts
+        otherwise safe cells so a low-confidence but wide/open corridor is not
+        treated as worse than a tight wall-hugging corridor.
+        """
+        prob = self.probability()
+        raw_quality = np.clip(self.quality, 0.0, 1.0)
+        known = self.known_mask()
+        free = prob < self.cfg.prob_free_threshold
+        occupied = prob > self.cfg.prob_occ_threshold
+
+        # 1) Occupancy safety.  The score falls as a cell approaches the
+        # occupied threshold, even before it is hard-classified as occupied.
+        free_score = np.clip(
+            (self.cfg.prob_occ_threshold - prob) / max(1e-6, self.cfg.prob_occ_threshold - 0.05),
+            0.0,
+            1.0,
+        )
+        free_score = np.power(free_score, max(0.01, float(cfg.free_score_power)))
+
+        # 2) Soft reliability.  Cell quality comes from the mapper pose at
+        # observation time, but it should not define safety by itself.
+        confidence_score = np.clip(raw_quality, 0.0, 1.0)
+        confidence_score = np.power(confidence_score, max(0.01, float(cfg.map_confidence_power)))
+        confidence_floor = min(1.0, max(0.0, float(cfg.map_confidence_floor)))
+        reliability_score = confidence_floor + (1.0 - confidence_floor) * confidence_score
+
+        # 3) Clearance score.  The center of a corridor/open area should score
+        # higher than cells close to corridor walls. Use a broad/adaptive
+        # reference so the score forms a gradient instead of turning green as
+        # soon as clearance exceeds the robot radius.
+        min_clearance = max(float(cfg.min_clearance_m), float(robot_radius_m))
+        good_clearance = max(float(cfg.good_clearance_m), min_clearance + self.res)
+        radius = max_radius_m if max_radius_m is not None else max(3.0, good_clearance * 1.8)
+        clearance = self.clearance_map(max_radius_m=radius)
+        clear_ref = good_clearance
+        ref_mask = known & free & np.isfinite(clearance)
+        if np.any(ref_mask):
+            pct = min(100.0, max(0.0, float(cfg.clearance_reference_percentile)))
+            clear_ref = max(clear_ref, float(np.percentile(clearance[ref_mask], pct)))
+        clearance_score = np.clip((clearance - min_clearance) / max(1e-6, clear_ref - min_clearance), 0.0, 1.0)
+        clearance_score = clearance_score * clearance_score * (3.0 - 2.0 * clearance_score)
+        clearance_score = np.power(clearance_score, max(0.01, float(cfg.clearance_power)))
+
+        passage = (
+            np.power(free_score, max(0.01, float(cfg.free_weight)))
+            * np.power(clearance_score, max(0.01, float(cfg.clearance_weight)))
+            * np.power(reliability_score, max(0.01, float(cfg.map_confidence_weight)))
+        )
+
+        # Unknown is not low-quality passage; it is not passage evidence yet.
+        passage[~(known & free)] = float(cfg.unknown_score)
+        passage[occupied] = float(cfg.occupied_score)
+        return np.clip(passage, 0.0, 1.0)
+
+    def make_digest(self, robot_id: int, time_s: float, max_cells: int | None = 650) -> dict:
         known = self.known_mask() & (self.quality > 0.05)
         ys, xs = np.nonzero(known)
-        if len(xs) > max_cells:
-            # Prefer recent/high-quality cells.
+        if max_cells is not None and len(xs) > max_cells:
+            # Prefer recent/high-quality cells for bandwidth-limited packets.
             score = self.quality[ys, xs] + 0.001 * np.maximum(0.0, self.last_seen[ys, xs])
-            keep = np.argsort(score)[-max_cells:]
+            keep = np.argsort(score)[-int(max_cells):]
             xs = xs[keep]
             ys = ys[keep]
         cells = [(int(i), int(j)) for i, j in zip(xs, ys)]

@@ -31,8 +31,15 @@ class LidarSensor:
         pts = np.zeros((self.cfg.rays, 2), dtype=float)
         th = true_pose[2]
         for k, a in enumerate(self.angles):
-            r, p, h = world.raycast(true_pose, float(a), self.cfg.range, step=0.12)
-            rn = float(np.clip(r + self.rng.normal(0.0, self.cfg.noise_std), 0.02, self.cfg.range))
+            r, _p, h = world.raycast(true_pose, float(a), self.cfg.range, step=self.cfg.raycast_step_m)
+            if h and self.rng.random() < self.cfg.dropout_probability:
+                h = False
+                r = self.cfg.range
+            if h:
+                sigma = self.cfg.noise_std + self.cfg.range_noise_std_per_m * max(0.0, float(r))
+                rn = float(np.clip(r + self.rng.normal(0.0, sigma), 0.02, self.cfg.range))
+            else:
+                rn = float(np.clip(self.cfg.range + self.rng.normal(0.0, self.cfg.max_range_noise_std), 0.02, self.cfg.range))
             ranges[k] = rn
             hit[k] = h and rn < self.cfg.range - self.cfg.hit_threshold
             pts[k] = [true_pose[0] + math.cos(th + a) * rn, true_pose[1] + math.sin(th + a) * rn]
