@@ -1,42 +1,12 @@
-"""Small geometry helpers used by the baseline simulator."""
+"""Small geometry primitives for the fresh environment editor."""
 from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Iterable
-
-import numpy as np
 
 
-Pose = tuple[float, float, float]
 Point = tuple[float, float]
-
-
-def wrap_angle(theta: float) -> float:
-    return (theta + math.pi) % (2.0 * math.pi) - math.pi
-
-
-def clamp(x: float, lo: float, hi: float) -> float:
-    return max(lo, min(hi, x))
-
-
-def distance(a: Point, b: Point) -> float:
-    return float(math.hypot(a[0] - b[0], a[1] - b[1]))
-
-
-def unit_from_angle(theta: float) -> tuple[float, float]:
-    return math.cos(theta), math.sin(theta)
-
-
-def angle_to(a: Point, b: Point) -> float:
-    return math.atan2(b[1] - a[1], b[0] - a[0])
-
-
-def segment_length(points: Iterable[Point]) -> float:
-    pts = list(points)
-    if len(pts) < 2:
-        return 0.0
-    return sum(distance(a, b) for a, b in zip(pts[:-1], pts[1:]))
+Pose = tuple[float, float, float]
 
 
 @dataclass(frozen=True)
@@ -47,28 +17,64 @@ class Rect:
     y1: float
 
     def normalized(self) -> "Rect":
-        return Rect(min(self.x0, self.x1), min(self.y0, self.y1), max(self.x0, self.x1), max(self.y0, self.y1))
+        return Rect(
+            min(self.x0, self.x1),
+            min(self.y0, self.y1),
+            max(self.x0, self.x1),
+            max(self.y0, self.y1),
+        )
 
     @property
     def center(self) -> Point:
         r = self.normalized()
         return ((r.x0 + r.x1) * 0.5, (r.y0 + r.y1) * 0.5)
 
-    def contains(self, p: Point, margin: float = 0.0) -> bool:
-        # Rectangles are normalized at construction in the world generator.
-        return (self.x0 - margin <= p[0] <= self.x1 + margin) and (self.y0 - margin <= p[1] <= self.y1 + margin)
+    def contains(self, point: Point, margin: float = 0.0) -> bool:
+        r = self.normalized()
+        return (
+            r.x0 - margin <= point[0] <= r.x1 + margin
+            and r.y0 - margin <= point[1] <= r.y1 + margin
+        )
 
     def corners(self) -> list[Point]:
         r = self.normalized()
         return [(r.x0, r.y0), (r.x1, r.y0), (r.x1, r.y1), (r.x0, r.y1)]
 
 
-def ccw(a: Point, b: Point, c: Point) -> bool:
-    return (c[1] - a[1]) * (b[0] - a[0]) > (b[1] - a[1]) * (c[0] - a[0])
+def unit_from_angle(theta: float) -> Point:
+    return math.cos(theta), math.sin(theta)
+
+
+def wrap_angle(theta: float) -> float:
+    return (theta + math.pi) % (2.0 * math.pi) - math.pi
+
+
+def _orientation(a: Point, b: Point, c: Point) -> float:
+    return (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])
+
+
+def _on_segment(a: Point, b: Point, c: Point) -> bool:
+    return (
+        min(a[0], c[0]) <= b[0] <= max(a[0], c[0])
+        and min(a[1], c[1]) <= b[1] <= max(a[1], c[1])
+    )
 
 
 def segments_intersect(a: Point, b: Point, c: Point, d: Point) -> bool:
-    return ccw(a, c, d) != ccw(b, c, d) and ccw(a, b, c) != ccw(a, b, d)
+    eps = 1e-9
+    o1 = _orientation(a, b, c)
+    o2 = _orientation(a, b, d)
+    o3 = _orientation(c, d, a)
+    o4 = _orientation(c, d, b)
+    if abs(o1) <= eps and _on_segment(a, c, b):
+        return True
+    if abs(o2) <= eps and _on_segment(a, d, b):
+        return True
+    if abs(o3) <= eps and _on_segment(c, a, d):
+        return True
+    if abs(o4) <= eps and _on_segment(c, b, d):
+        return True
+    return (o1 > 0.0) != (o2 > 0.0) and (o3 > 0.0) != (o4 > 0.0)
 
 
 def segment_intersects_rect(a: Point, b: Point, rect: Rect, margin: float = 0.0) -> bool:
@@ -78,15 +84,3 @@ def segment_intersects_rect(a: Point, b: Point, rect: Rect, margin: float = 0.0)
     corners = r.corners()
     edges = list(zip(corners, corners[1:] + corners[:1]))
     return any(segments_intersect(a, b, c, d) for c, d in edges)
-
-
-def covariance_ellipse(cov_xy: np.ndarray, scale: float = 2.0, samples: int = 40) -> tuple[np.ndarray, np.ndarray]:
-    cov = np.asarray(cov_xy, dtype=float)
-    if cov.shape != (2, 2) or not np.all(np.isfinite(cov)):
-        return np.array([]), np.array([])
-    vals, vecs = np.linalg.eigh(cov)
-    vals = np.maximum(vals, 1e-9)
-    theta = np.linspace(0.0, 2.0 * math.pi, samples)
-    circle = np.vstack([np.cos(theta), np.sin(theta)])
-    ellipse = vecs @ np.diag(np.sqrt(vals) * scale) @ circle
-    return ellipse[0], ellipse[1]

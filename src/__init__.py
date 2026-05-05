@@ -1,1 +1,1 @@
-"""Search-CAGE baseline simulator package."""
+"""Fresh Pathplaning environment editor package."""

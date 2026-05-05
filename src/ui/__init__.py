@@ -1,1 +1,1 @@
-"""UI package."""
+"""Fresh editor UI package."""
