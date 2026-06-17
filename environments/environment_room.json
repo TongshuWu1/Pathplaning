@@ -1,0 +1,659 @@
+{
+  "schema": "pathplaning.environment",
+  "version": 2,
+  "name": "environment_room",
+  "size": {
+    "width": 34.0,
+    "height": 26.0
+  },
+  "grid_size": 0.25,
+  "wall_thickness": 0.25,
+  "home": {
+    "id": "home",
+    "kind": "home",
+    "rect": [
+      1.0,
+      1.0,
+      4.0,
+      4.0
+    ],
+    "name": "HOME"
+  },
+  "target": {
+    "xy": [
+      11.25,
+      23.25
+    ]
+  },
+  "robot": {
+    "length": 0.72,
+    "width": 0.42,
+    "safety_margin": 0.14
+  },
+  "landmarks": [
+    {
+      "id": "landmark_home_exit",
+      "kind": "landmark",
+      "xy": [
+        5.0,
+        5.0
+      ],
+      "name": "L1"
+    },
+    {
+      "id": "landmark_south_lab",
+      "kind": "landmark",
+      "xy": [
+        15.0,
+        5.5
+      ],
+      "name": "L2"
+    },
+    {
+      "id": "landmark_east_storage",
+      "kind": "landmark",
+      "xy": [
+        27.25,
+        7.0
+      ],
+      "name": "L3"
+    },
+    {
+      "id": "landmark_central_hall",
+      "kind": "landmark",
+      "xy": [
+        17.5,
+        12.0
+      ],
+      "name": "L4"
+    },
+    {
+      "id": "landmark_west_office",
+      "kind": "landmark",
+      "xy": [
+        7.25,
+        18.75
+      ],
+      "name": "L5"
+    },
+    {
+      "id": "landmark_north_lab",
+      "kind": "landmark",
+      "xy": [
+        21.0,
+        19.25
+      ],
+      "name": "L6"
+    },
+    {
+      "id": "landmark_target_wing",
+      "kind": "landmark",
+      "xy": [
+        29.5,
+        20.75
+      ],
+      "name": "L7"
+    },
+    {
+      "id": "landmark_loading_bay",
+      "kind": "landmark",
+      "xy": [
+        30.5,
+        12.5
+      ],
+      "name": "L8"
+    }
+  ],
+  "rects": [
+    {
+      "id": "wall_boundary_bottom",
+      "kind": "wall",
+      "rect": [
+        0.0,
+        0.0,
+        34.0,
+        0.25
+      ],
+      "name": "boundary_bottom"
+    },
+    {
+      "id": "wall_boundary_top",
+      "kind": "wall",
+      "rect": [
+        0.0,
+        25.75,
+        34.0,
+        26.0
+      ],
+      "name": "boundary_top"
+    },
+    {
+      "id": "wall_boundary_left",
+      "kind": "wall",
+      "rect": [
+        0.0,
+        0.0,
+        0.25,
+        26.0
+      ],
+      "name": "boundary_left"
+    },
+    {
+      "id": "wall_boundary_right",
+      "kind": "wall",
+      "rect": [
+        33.75,
+        0.0,
+        34.0,
+        26.0
+      ],
+      "name": "boundary_right"
+    },
+    {
+      "id": "wall_lower_hall_a",
+      "kind": "wall",
+      "rect": [
+        4.25,
+        9.75,
+        11.0,
+        10.0
+      ],
+      "name": "south_corridor_wall_a"
+    },
+    {
+      "id": "wall_lower_hall_b",
+      "kind": "wall",
+      "rect": [
+        14.0,
+        9.75,
+        20.5,
+        10.0
+      ],
+      "name": "south_corridor_wall_b"
+    },
+    {
+      "id": "wall_lower_hall_c",
+      "kind": "wall",
+      "rect": [
+        23.5,
+        9.75,
+        33.75,
+        10.0
+      ],
+      "name": "south_corridor_wall_c"
+    },
+    {
+      "id": "wall_upper_hall_a",
+      "kind": "wall",
+      "rect": [
+        4.25,
+        14.0,
+        7.75,
+        14.25
+      ],
+      "name": "north_corridor_wall_a"
+    },
+    {
+      "id": "wall_upper_hall_b",
+      "kind": "wall",
+      "rect": [
+        10.5,
+        14.0,
+        16.25,
+        14.25
+      ],
+      "name": "north_corridor_wall_b"
+    },
+    {
+      "id": "wall_upper_hall_c",
+      "kind": "wall",
+      "rect": [
+        19.5,
+        14.0,
+        25.25,
+        14.25
+      ],
+      "name": "north_corridor_wall_c"
+    },
+    {
+      "id": "wall_upper_hall_d",
+      "kind": "wall",
+      "rect": [
+        28.25,
+        14.0,
+        33.75,
+        14.25
+      ],
+      "name": "north_corridor_wall_d"
+    },
+    {
+      "id": "wall_west_lower_partition_a",
+      "kind": "wall",
+      "rect": [
+        8.5,
+        0.25,
+        8.75,
+        4.25
+      ],
+      "name": "west_lower_partition_a"
+    },
+    {
+      "id": "wall_west_lower_partition_b",
+      "kind": "wall",
+      "rect": [
+        8.5,
+        6.25,
+        8.75,
+        9.75
+      ],
+      "name": "west_lower_partition_b"
+    },
+    {
+      "id": "wall_south_lab_partition_a",
+      "kind": "wall",
+      "rect": [
+        17.25,
+        0.25,
+        17.5,
+        6.0
+      ],
+      "name": "south_lab_partition_a"
+    },
+    {
+      "id": "wall_west_room_top_a",
+      "kind": "wall",
+      "rect": [
+        0.25,
+        6.0,
+        4.25,
+        6.25
+      ],
+      "name": "west_room_top_a"
+    },
+    {
+      "id": "wall_west_room_top_b",
+      "kind": "wall",
+      "rect": [
+        6.5,
+        6.0,
+        8.5,
+        6.25
+      ],
+      "name": "west_room_top_b"
+    },
+    {
+      "id": "wall_south_mid_top_a",
+      "kind": "wall",
+      "rect": [
+        8.75,
+        6.5,
+        13.25,
+        6.75
+      ],
+      "name": "south_mid_top_a"
+    },
+    {
+      "id": "wall_south_mid_top_b",
+      "kind": "wall",
+      "rect": [
+        15.5,
+        6.5,
+        17.25,
+        6.75
+      ],
+      "name": "south_mid_top_b"
+    },
+    {
+      "id": "wall_east_storage_top_a",
+      "kind": "wall",
+      "rect": [
+        25.75,
+        6.25,
+        29.0,
+        6.5
+      ],
+      "name": "east_storage_top_a"
+    },
+    {
+      "id": "wall_east_storage_top_b",
+      "kind": "wall",
+      "rect": [
+        31.25,
+        6.25,
+        33.75,
+        6.5
+      ],
+      "name": "east_storage_top_b"
+    },
+    {
+      "id": "wall_west_upper_partition",
+      "kind": "wall",
+      "rect": [
+        8.25,
+        14.25,
+        8.5,
+        25.75
+      ],
+      "name": "west_upper_partition"
+    },
+    {
+      "id": "wall_upper_mid_partition_a",
+      "kind": "wall",
+      "rect": [
+        17.0,
+        14.25,
+        17.25,
+        18.5
+      ],
+      "name": "upper_mid_partition_a"
+    },
+    {
+      "id": "wall_upper_east_partition_a",
+      "kind": "wall",
+      "rect": [
+        26.0,
+        14.25,
+        26.25,
+        16.5
+      ],
+      "name": "upper_east_partition_a"
+    },
+    {
+      "id": "wall_upper_east_partition_b",
+      "kind": "wall",
+      "rect": [
+        26.0,
+        18.75,
+        26.25,
+        25.75
+      ],
+      "name": "upper_east_partition_b"
+    },
+    {
+      "id": "wall_north_cross_a",
+      "kind": "wall",
+      "rect": [
+        0.25,
+        20.25,
+        5.0,
+        20.5
+      ],
+      "name": "north_cross_a"
+    },
+    {
+      "id": "wall_north_cross_b",
+      "kind": "wall",
+      "rect": [
+        7.25,
+        20.25,
+        17.0,
+        20.5
+      ],
+      "name": "north_cross_b"
+    },
+    {
+      "id": "wall_north_cross_c",
+      "kind": "wall",
+      "rect": [
+        17.25,
+        20.25,
+        21.5,
+        20.5
+      ],
+      "name": "north_cross_c"
+    },
+    {
+      "id": "wall_north_cross_d",
+      "kind": "wall",
+      "rect": [
+        24.0,
+        20.25,
+        26.0,
+        20.5
+      ],
+      "name": "north_cross_d"
+    },
+    {
+      "id": "wall_target_room_lower_a",
+      "kind": "wall",
+      "rect": [
+        26.25,
+        20.25,
+        30.0,
+        20.5
+      ],
+      "name": "target_room_lower_a"
+    },
+    {
+      "id": "wall_target_room_lower_b",
+      "kind": "wall",
+      "rect": [
+        32.25,
+        20.25,
+        33.75,
+        20.5
+      ],
+      "name": "target_room_lower_b"
+    },
+    {
+      "id": "wall_service_dead_end",
+      "kind": "wall",
+      "rect": [
+        30.0,
+        10.0,
+        30.25,
+        14.0
+      ],
+      "name": "service_dead_end"
+    },
+    {
+      "id": "obstacle_hall_table",
+      "kind": "obstacle",
+      "rect": [
+        15.5,
+        11.0,
+        17.25,
+        12.25
+      ],
+      "name": "central_table"
+    },
+    {
+      "id": "obstacle_hall_column_a",
+      "kind": "obstacle",
+      "rect": [
+        22.0,
+        11.25,
+        22.75,
+        12.0
+      ],
+      "name": "hall_column_a"
+    },
+    {
+      "id": "obstacle_hall_column_b",
+      "kind": "obstacle",
+      "rect": [
+        25.0,
+        11.25,
+        25.75,
+        12.0
+      ],
+      "name": "hall_column_b"
+    },
+    {
+      "id": "obstacle_south_lab_bench",
+      "kind": "obstacle",
+      "rect": [
+        12.0,
+        2.25,
+        15.75,
+        3.25
+      ],
+      "name": "south_lab_bench"
+    },
+    {
+      "id": "obstacle_storage_shelves_a",
+      "kind": "obstacle",
+      "rect": [
+        27.0,
+        2.25,
+        32.0,
+        2.75
+      ],
+      "name": "storage_shelf_a"
+    },
+    {
+      "id": "obstacle_storage_shelves_b",
+      "kind": "obstacle",
+      "rect": [
+        27.0,
+        4.25,
+        32.0,
+        5.0
+      ],
+      "name": "storage_shelf_b"
+    },
+    {
+      "id": "obstacle_west_office_desk",
+      "kind": "obstacle",
+      "rect": [
+        2.25,
+        16.5,
+        5.75,
+        17.25
+      ],
+      "name": "west_office_desk"
+    },
+    {
+      "id": "obstacle_north_lab_island",
+      "kind": "obstacle",
+      "rect": [
+        19.25,
+        22.0,
+        23.25,
+        23.0
+      ],
+      "name": "north_lab_island"
+    },
+    {
+      "id": "obstacle_target_room_console",
+      "kind": "obstacle",
+      "rect": [
+        29.0,
+        23.75,
+        32.25,
+        24.25
+      ],
+      "name": "target_room_console"
+    },
+    {
+      "id": "wall_176d119d",
+      "kind": "wall",
+      "rect": [
+        8.25,
+        6.0,
+        8.75,
+        6.25
+      ],
+      "name": "wall"
+    },
+    {
+      "id": "wall_9a7f438e",
+      "kind": "wall",
+      "rect": [
+        7.75,
+        14.0,
+        8.5,
+        14.25
+      ],
+      "name": "wall"
+    },
+    {
+      "id": "wall_ae4a5ce6",
+      "kind": "wall",
+      "rect": [
+        16.25,
+        14.0,
+        17.25,
+        14.25
+      ],
+      "name": "wall"
+    },
+    {
+      "id": "wall_a31bca76",
+      "kind": "wall",
+      "rect": [
+        17.0,
+        20.25,
+        17.25,
+        20.5
+      ],
+      "name": "wall"
+    },
+    {
+      "id": "wall_6ccddba6",
+      "kind": "wall",
+      "rect": [
+        15.0,
+        23.25,
+        15.25,
+        25.75
+      ],
+      "name": "wall"
+    },
+    {
+      "id": "wall_df13f8e1",
+      "kind": "wall",
+      "rect": [
+        17.25,
+        6.5,
+        17.5,
+        6.75
+      ],
+      "name": "wall"
+    },
+    {
+      "id": "wall_ca0e586b",
+      "kind": "wall",
+      "rect": [
+        17.25,
+        6.0,
+        17.5,
+        6.25
+      ],
+      "name": "wall"
+    },
+    {
+      "id": "wall_5cbd4fcf",
+      "kind": "wall",
+      "rect": [
+        17.25,
+        6.0,
+        17.5,
+        6.5
+      ],
+      "name": "wall"
+    },
+    {
+      "id": "wall_a0bba999",
+      "kind": "wall",
+      "rect": [
+        25.0,
+        0.0,
+        25.25,
+        3.25
+      ],
+      "name": "wall"
+    },
+    {
+      "id": "wall_fd992326",
+      "kind": "wall",
+      "rect": [
+        25.25,
+        14.0,
+        26.25,
+        14.25
+      ],
+      "name": "wall"
+    }
+  ]
+}
